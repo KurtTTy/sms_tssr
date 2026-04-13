@@ -351,4 +351,4 @@ This project is proprietary. All rights reserved.
 
 ---
 
-*Built for telecom field engineers by the SMS-ISDP team.*
+*Built for telecom field engineers by the SMSGT-OJT.*
