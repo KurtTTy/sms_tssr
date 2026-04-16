@@ -2,10 +2,12 @@ package com.example.isdp2java.ui.main
 
 import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
 import android.graphics.*
 import android.location.Geocoder
 import android.media.MediaScannerConnection
 import android.net.Uri
+import android.os.Build
 import android.os.Environment
 import android.os.Looper
 import android.util.Log
@@ -17,6 +19,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -38,6 +41,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import com.google.android.gms.location.*
 import kotlinx.coroutines.Dispatchers
@@ -63,20 +67,27 @@ import com.itextpdf.layout.element.Paragraph
 import com.itextpdf.layout.properties.TextAlignment
 import org.apache.poi.xwpf.usermodel.*
 import org.apache.poi.util.Units
+import com.example.isdp2java.utils.FileUtils
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun TSSRScreen(initialFolder: String? = null, initialTelco: String? = null, onBack: () -> Unit) {
+fun TSSRScreen(
+    initialFolder: String? = null,
+    initialTelco: String? = null,
+    onBack: () -> Unit,
+    onFolderChange: (String?) -> Unit = {}
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var siteName by rememberSaveable { mutableStateOf("") }
+    var isSiteNameConfirmed by rememberSaveable { mutableStateOf(false) }
     var lat by rememberSaveable { mutableStateOf("") }
     var lng by rememberSaveable { mutableStateOf("") }
     var fullAddress by rememberSaveable { mutableStateOf("Detecting location...") }
     var vehicleAccess by rememberSaveable { mutableStateOf("4 Wheeled") }
     var otherVehicleAccess by rememberSaveable { mutableStateOf("") }
     var telcoName by rememberSaveable { mutableStateOf(initialTelco ?: "Globe") }
-    var wifiTelcoName by rememberSaveable { mutableStateOf("") }
+    var customTelcoName by rememberSaveable { mutableStateOf("") }
     
     val sessionTimestamp = rememberSaveable { SimpleDateFormat("yyyyMMdd_HHmm", Locale.getDefault()).format(Date()) }
     val sectionImages = remember { mutableStateMapOf<String, Uri?>() }
@@ -87,12 +98,30 @@ fun TSSRScreen(initialFolder: String? = null, initialTelco: String? = null, onBa
     var viewerFieldName by remember { mutableStateOf<String?>(null) }
 
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
-    var customFolderName by rememberSaveable { mutableStateOf<String?>(initialFolder) }
+    var customFolderName by remember { mutableStateOf(initialFolder) }
+
+    // Sync back to MainActivity when local folder state changes
+    LaunchedEffect(initialFolder) {
+        if (initialFolder != customFolderName) {
+            customFolderName = initialFolder
+        }
+    }
+
+    LaunchedEffect(customFolderName) {
+        onFolderChange(customFolderName)
+    }
     var showCreateFolderDialog by remember { mutableStateOf(false) }
     var showSelectFolderDialog by remember { mutableStateOf(false) }
     var existingFolders by remember { mutableStateOf<List<String>>(emptyList()) }
 
     var showReportOptions by remember { mutableStateOf(false) }
+    var triedToProceed by rememberSaveable { mutableStateOf(false) }
+
+    val isHeaderValid = siteName.isNotBlank() && 
+            (isSiteNameConfirmed || !customFolderName.isNullOrBlank()) && 
+            lat.isNotBlank() && 
+            lng.isNotBlank() && 
+            (telcoName != "Neutral" || customTelcoName.isNotBlank())
 
     val fusedLocationClient = remember { LocationServices.getFusedLocationProviderClient(context) }
 
@@ -106,7 +135,7 @@ fun TSSRScreen(initialFolder: String? = null, initialTelco: String? = null, onBa
                         lng = location.longitude.toString()
                         scope.launch {
                             fullAddress = withContext(Dispatchers.IO) {
-                                getAddressFromLocation(context, location.latitude, location.longitude)
+                                FileUtils.getAddressFromLocation(context, location.latitude, location.longitude)
                             }
                         }
                     }
@@ -115,27 +144,137 @@ fun TSSRScreen(initialFolder: String? = null, initialTelco: String? = null, onBa
         }
     }
 
+    var activeFieldKey by rememberSaveable { mutableStateOf<String?>(null) }
+    var activeFieldSection by rememberSaveable { mutableStateOf<String?>(null) }
+    var activeFieldName by rememberSaveable { mutableStateOf<String?>(null) }
+    var tempPhotoUriString by rememberSaveable { mutableStateOf<String?>(null) }
+    var tempFilePath by rememberSaveable { mutableStateOf<String?>(null) }
+
+    val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
+        if (success && tempPhotoUriString != null && activeFieldKey != null) {
+            val originalUri = Uri.parse(tempPhotoUriString!!)
+            scope.launch {
+                val overlaidUri = withContext(Dispatchers.IO) {
+                    FileUtils.addOverlayToImage(context, originalUri, siteName, lat, lng, fullAddress)
+                }
+                overlaidUri?.let { uri ->
+                    sectionImages[activeFieldKey!!] = uri
+                    viewerUri = uri
+                    viewerFieldKey = activeFieldKey
+                    viewerFieldSection = activeFieldSection
+                    viewerFieldName = activeFieldName
+                    
+                    // Force media scan so it shows in device gallery
+                    tempFilePath?.let { path ->
+                        MediaScannerConnection.scanFile(context, arrayOf(path), null, null)
+                    }
+                }
+            }
+        }
+    }
+
+    val galleryLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { selectedUri ->
+        selectedUri?.let { sourceUri ->
+            scope.launch {
+                val overlaidUri = withContext(Dispatchers.IO) {
+                    FileUtils.addOverlayToImage(context, sourceUri, siteName, lat, lng, fullAddress)
+                }
+                overlaidUri?.let { uri ->
+                    sectionImages[activeFieldKey!!] = uri
+                    viewerUri = uri
+                    viewerFieldKey = activeFieldKey
+                    viewerFieldSection = activeFieldSection
+                    viewerFieldName = activeFieldName
+                }
+            }
+        }
+    }
+
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted ->
+        if (isGranted) {
+            activeFieldKey?.let { key ->
+                activeFieldSection?.let { section ->
+                    activeFieldName?.let { field ->
+                        FileUtils.createSurveyFile(context, "TSSR", siteName, section, field, sessionTimestamp, customFolderName)?.let { file ->
+                            tempFilePath = file.absolutePath
+                            val uri = FileProvider.getUriForFile(context, "com.example.isdp2java.fileprovider", file)
+                            tempPhotoUriString = uri.toString()
+                            cameraLauncher.launch(uri)
+                        }
+                    }
+                }
+            }
+        } else {
+            Toast.makeText(context, "Camera permission denied", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    val locationPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
+        if (permissions.values.all { it }) {
+            try {
+                val locationRequest = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 1500)
+                    .setMinUpdateDistanceMeters(0.5f)
+                    .build()
+                fusedLocationClient.requestLocationUpdates(locationRequest, locationCallback, Looper.getMainLooper())
+            } catch (e: SecurityException) {}
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        val hasFine = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        val hasCoarse = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        
+        if (!hasFine || !hasCoarse) {
+            locationPermissionLauncher.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION))
+        } else {
+            try {
+                fusedLocationClient.lastLocation.addOnSuccessListener { location ->
+                    if (initialFolder == null && location != null) {
+                        if (lat.isEmpty()) lat = location.latitude.toString()
+                        if (lng.isEmpty()) lng = location.longitude.toString()
+                        scope.launch {
+                            if (fullAddress == "Detecting location...") {
+                                fullAddress = withContext(Dispatchers.IO) {
+                                    FileUtils.getAddressFromLocation(context, location.latitude, location.longitude)
+                                }
+                            }
+                        }
+                    }
+                }
+                val locationRequest = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 1500)
+                    .setMinUpdateDistanceMeters(0.5f)
+                    .build()
+                fusedLocationClient.requestLocationUpdates(locationRequest, locationCallback, Looper.getMainLooper())
+            } catch (e: SecurityException) {}
+        }
+
+        Configuration.getInstance().load(context, context.getSharedPreferences("osm_prefs", Context.MODE_PRIVATE))
+        Configuration.getInstance().userAgentValue = context.packageName
+    }
+
+    DisposableEffect(Unit) {
+        onDispose { fusedLocationClient.removeLocationUpdates(locationCallback) }
+    }
+
     LaunchedEffect(initialFolder) {
         if (initialFolder != null) {
-            val tssrDir = getSiteFolder(context, "", "", initialFolder)
+            val tssrDir = FileUtils.getSurveyFolder(context, "TSSR", "", "", initialFolder)
             if (tssrDir != null && tssrDir.exists()) {
                 withContext(Dispatchers.IO) {
-                    val metadataFile = File(tssrDir, "metadata.properties")
-                    if (metadataFile.exists()) {
-                        val props = Properties()
-                        try {
-                            metadataFile.inputStream().use { props.load(it) }
+                    try {
+                        val props = FileUtils.loadMetadata(tssrDir)
+                        if (props != null) {
                             withContext(Dispatchers.Main) {
                                 siteName = props.getProperty("siteName", "")
+                                if (siteName.isNotBlank()) isSiteNameConfirmed = true
                                 lat = props.getProperty("lat", "")
                                 lng = props.getProperty("lng", "")
                                 fullAddress = props.getProperty("fullAddress", "")
                                 vehicleAccess = props.getProperty("vehicleAccess", "4 Wheeled")
                                 otherVehicleAccess = props.getProperty("otherVehicleAccess", "")
-                                if (initialTelco == null || initialTelco == "Wifi") {
+                                if (initialTelco == null) {
                                     telcoName = props.getProperty("telcoName", telcoName)
                                 }
-                                wifiTelcoName = props.getProperty("wifiTelcoName", "")
                                 
                                 props.stringPropertyNames().filter { it.startsWith("img_") }.forEach { propKey ->
                                     val key = propKey.substring(4)
@@ -146,26 +285,26 @@ fun TSSRScreen(initialFolder: String? = null, initialTelco: String? = null, onBa
                                     }
                                 }
                             }
-                        } catch (e: Exception) {
-                            Log.e("TSSR", "Failed to load metadata", e)
+                        } else {
+                            withContext(Dispatchers.Main) {
+                                siteName = initialFolder.substringBeforeLast("_")
+                                if (siteName.isNotBlank()) isSiteNameConfirmed = true
+                            }
                         }
-                    } else {
-                        withContext(Dispatchers.Main) {
-                            siteName = initialFolder.substringBeforeLast("_")
-                        }
+                    } catch (e: Exception) {
+                        Log.e("TSSR", "Failed to load metadata", e)
                     }
                 }
             }
         }
     }
 
-    LaunchedEffect(siteName, lat, lng, fullAddress, vehicleAccess, otherVehicleAccess, telcoName, wifiTelcoName, sectionImages.size) {
-        if (siteName.isNotBlank() || customFolderName != null) {
-            val folder = getSiteFolder(context, siteName, sessionTimestamp, customFolderName)
+    LaunchedEffect(isSiteNameConfirmed, customFolderName, lat, lng, fullAddress, vehicleAccess, otherVehicleAccess, telcoName, customTelcoName, sectionImages.size) {
+        if (customFolderName != null || (isSiteNameConfirmed && siteName.isNotBlank())) {
+            val folder = FileUtils.getSurveyFolder(context, "TSSR", siteName, sessionTimestamp, customFolderName)
             if (folder != null) {
                 withContext(Dispatchers.IO) {
                     try {
-                        val metadataFile = File(folder, "metadata.properties")
                         val props = Properties()
                         props.setProperty("siteName", siteName)
                         props.setProperty("lat", lat)
@@ -173,67 +312,26 @@ fun TSSRScreen(initialFolder: String? = null, initialTelco: String? = null, onBa
                         props.setProperty("fullAddress", fullAddress)
                         props.setProperty("vehicleAccess", vehicleAccess)
                         props.setProperty("otherVehicleAccess", otherVehicleAccess)
-                        props.setProperty("telcoName", telcoName)
-                        props.setProperty("wifiTelcoName", wifiTelcoName)
                         
+                        val finalTelco = if (telcoName == "Neutral" && customTelcoName.isNotBlank()) customTelcoName else telcoName
+                        props.setProperty("telcoName", finalTelco)
+                        props.setProperty("surveyType", "TSSR")
+
                         sectionImages.forEach { (key, uri) ->
-                            try {
-                                val fileName = uri?.lastPathSegment ?: ""
-                                folder.listFiles { f -> f.isDirectory }?.forEach { sectionDir ->
-                                    val imgFile = File(sectionDir, fileName)
-                                    if (imgFile.exists()) {
-                                        props.setProperty("img_$key", "${sectionDir.name}/$fileName")
-                                    }
+                            uri?.let { u ->
+                                val relPath = FileUtils.findImageRelativePath(folder, u)
+                                if (relPath != null) {
+                                    props.setProperty("img_$key", relPath)
                                 }
-                            } catch (e: Exception) {}
+                            }
                         }
-                        metadataFile.outputStream().use { props.store(it, "TSSR Metadata") }
+                        FileUtils.saveMetadata(folder, props, "TSSR Survey Metadata")
                     } catch (e: Exception) {
-                        Log.e("TSSR", "Metadata save failed", e)
+                        Log.e("TSSR", "Failed to save metadata", e)
                     }
                 }
             }
         }
-    }
-
-    val permissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestMultiplePermissions()
-    ) { }
-
-    LaunchedEffect(Unit) {
-        permissionLauncher.launch(arrayOf(
-            Manifest.permission.CAMERA,
-            Manifest.permission.ACCESS_FINE_LOCATION,
-            Manifest.permission.ACCESS_COARSE_LOCATION
-        ))
-        
-        try {
-            fusedLocationClient.lastLocation.addOnSuccessListener { location ->
-                if (initialFolder == null && location != null) {
-                    if (lat.isEmpty()) lat = location.latitude.toString()
-                    if (lng.isEmpty()) lng = location.longitude.toString()
-                    scope.launch {
-                        if (fullAddress == "Detecting location...") {
-                            fullAddress = withContext(Dispatchers.IO) {
-                                getAddressFromLocation(context, location.latitude, location.longitude)
-                            }
-                        }
-                    }
-                }
-            }
-        } catch (e: SecurityException) {}
-
-        Configuration.getInstance().load(context, context.getSharedPreferences("osm_prefs", Context.MODE_PRIVATE))
-        Configuration.getInstance().userAgentValue = context.packageName
-        
-        val locationRequest = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 2000).build()
-        try {
-            fusedLocationClient.requestLocationUpdates(locationRequest, locationCallback, Looper.getMainLooper())
-        } catch (e: SecurityException) {}
-    }
-
-    DisposableEffect(Unit) {
-        onDispose { fusedLocationClient.removeLocationUpdates(locationCallback) }
     }
 
     val sections = remember {
@@ -254,98 +352,37 @@ fun TSSRScreen(initialFolder: String? = null, initialTelco: String? = null, onBa
         )
     }
 
-    var activeFieldKey by rememberSaveable { mutableStateOf<String?>(null) }
-    var activeFieldSection by rememberSaveable { mutableStateOf<String?>(null) }
-    var activeFieldName by rememberSaveable { mutableStateOf<String?>(null) }
-    var tempPhotoUriString by rememberSaveable { mutableStateOf<String?>(null) }
-    var tempFilePath by rememberSaveable { mutableStateOf<String?>(null) }
-
-    val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
-        if (success && tempPhotoUriString != null && activeFieldKey != null) {
-            val originalUri = Uri.parse(tempPhotoUriString)
-            scope.launch {
-                val overlaidUri = withContext(Dispatchers.IO) {
-                    addOverlayToImage(context, originalUri, siteName, lat, lng, fullAddress)
-                }
-                overlaidUri?.let {
-                    sectionImages[activeFieldKey!!] = it
-                    viewerUri = it
-                    viewerFieldKey = activeFieldKey
-                    viewerFieldSection = activeFieldSection
-                    viewerFieldName = activeFieldName
-                }
-            }
-        }
-    }
-
-    val galleryLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        uri?.let { sourceUri ->
-            val key = activeFieldKey ?: viewerFieldKey ?: return@let
-            val section = activeFieldSection ?: viewerFieldSection ?: "General"
-            val fieldName = activeFieldName ?: viewerFieldName ?: "Photo"
-            
-            scope.launch {
-                val destFile = withContext(Dispatchers.IO) {
-                    createTSSRFile(context, siteName, section, fieldName, sessionTimestamp, customFolderName)
-                }
-                destFile?.let { file ->
-                    val destUri = FileProvider.getUriForFile(context, "com.example.isdp2java.fileprovider", file)
-                    withContext(Dispatchers.IO) {
-                        context.contentResolver.openInputStream(sourceUri)?.use { input ->
-                            context.contentResolver.openOutputStream(destUri)?.use { output -> input.copyTo(output) }
-                        }
-                    }
-                    val overlaidUri = withContext(Dispatchers.IO) {
-                        addOverlayToImage(context, destUri, siteName, lat, lng, fullAddress)
-                    }
-                    overlaidUri?.let {
-                        sectionImages[key] = it
-                        viewerUri = it
-                        viewerFieldKey = key
-                        viewerFieldSection = section
-                        viewerFieldName = fieldName
-                        MediaScannerConnection.scanFile(context, arrayOf(file.absolutePath), null, null)
-                    }
-                }
-            }
-        }
-    }
-
     var mapRef by remember { mutableStateOf<MapView?>(null) }
 
     fun captureMapSnapshot() {
         val map = mapRef ?: return
+        val bitmap = Bitmap.createBitmap(map.width, map.height, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        map.draw(canvas)
+
         val key = "A3.1 Site Location_Vicinity Map"
-        val section = "A3.1 Site Location"
-        val fieldName = "Vicinity Map"
+        val folder = FileUtils.getSurveyFolder(context, "TSSR", siteName, sessionTimestamp, customFolderName) ?: return
+        val subDir = File(folder, "A3_1_Site_Location")
+        if (!subDir.exists()) subDir.mkdirs()
+
+        val file = File(subDir, "A3_1_Site_Location_Vicinity_Map_${sessionTimestamp}.jpg")
+        FileOutputStream(file).use { out ->
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 90, out)
+        }
+        val uri = FileProvider.getUriForFile(context, "com.example.isdp2java.fileprovider", file)
         
         scope.launch {
-            val destFile = withContext(Dispatchers.IO) {
-                createTSSRFile(context, siteName, section, fieldName, sessionTimestamp, customFolderName)
+            val overlaidUri = withContext(Dispatchers.IO) {
+                FileUtils.addOverlayToImage(context, uri, siteName, lat, lng, fullAddress)
             }
-            destFile?.let { file ->
-                val bitmap = Bitmap.createBitmap(map.width, map.height, Bitmap.Config.ARGB_8888)
-                val canvas = Canvas(bitmap)
-                map.draw(canvas)
-                
-                withContext(Dispatchers.IO) {
-                    FileOutputStream(file).use { out ->
-                        bitmap.compress(Bitmap.CompressFormat.JPEG, 90, out)
-                    }
-                }
-                val uri = FileProvider.getUriForFile(context, "com.example.isdp2java.fileprovider", file)
-                val overlaidUri = withContext(Dispatchers.IO) {
-                    addOverlayToImage(context, uri, siteName, lat, lng, fullAddress)
-                }
-                overlaidUri?.let {
-                    sectionImages[key] = it
-                    viewerUri = it
-                    viewerFieldKey = key
-                    viewerFieldSection = section
-                    viewerFieldName = fieldName
-                    MediaScannerConnection.scanFile(context, arrayOf(file.absolutePath), null, null)
-                }
-                bitmap.recycle()
+            overlaidUri?.let {
+                sectionImages[key] = it
+                viewerUri = it
+                viewerFieldKey = key
+                viewerFieldSection = "A3.1 Site Location"
+                viewerFieldName = "Vicinity Map"
+                MediaScannerConnection.scanFile(context, arrayOf(file.absolutePath), null, null)
+                Toast.makeText(context, "Map snapshot captured", Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -365,10 +402,10 @@ fun TSSRScreen(initialFolder: String? = null, initialTelco: String? = null, onBa
                             onClick = {
                                 scope.launch {
                                     val folders = withContext(Dispatchers.IO) {
-                                        val appDir = File(context.getExternalFilesDir(null), "SMS_ISDP")
-                                        if (appDir.exists()) {
-                                            appDir.listFiles { file -> file.isDirectory }?.map { it.name } ?: emptyList()
-                                        } else emptyList()
+                                        val rootDir = Environment.getExternalStorageDirectory()
+                                        val baseDir = File(rootDir, "SMS_ISDP_Surveys")
+                                        if (!baseDir.exists()) baseDir.mkdirs()
+                                        baseDir.listFiles { file -> file.isDirectory && File(file, "metadata.properties").exists() }?.map { it.name } ?: emptyList()
                                     }
                                     existingFolders = folders
                                     drawerState.close()
@@ -409,92 +446,145 @@ fun TSSRScreen(initialFolder: String? = null, initialTelco: String? = null, onBa
         }
     ) {
         Scaffold(
-            topBar = {
-                TopAppBar(
-                    title = {
-                        Column {
-                            Text("TSSR Report", fontWeight = FontWeight.Bold, fontSize = 18.sp)
-                            if (customFolderName != null) {
-                                Text("Folder: $customFolderName", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
-                            }
-                        }
-                    },
-                    navigationIcon = {
-                        IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
-                    },
-                    actions = {
-                        IconButton(onClick = { scope.launch { drawerState.open() } }) {
-                            Icon(Icons.Default.Settings, "Settings")
-                        }
+        topBar = {
+            TopAppBar(
+                title = { Text("TSSR Survey") },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, null)
                     }
-                )
-            }
-        ) { padding ->
-            LazyColumn(
-                modifier = Modifier.padding(padding).fillMaxSize().padding(horizontal = 16.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp)
-            ) {
-                item {
-                    Card(modifier = Modifier.fillMaxWidth().padding(top = 16.dp)) {
-                        Column(modifier = Modifier.padding(16.dp)) {
-                            Text("Site Information", fontWeight = FontWeight.Bold, fontSize = 18.sp)
-                            Spacer(Modifier.height(8.dp))
-                            OutlinedTextField(value = siteName, onValueChange = { siteName = it }, label = { Text("Site Name") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-                            if (telcoName == "Wifi") {
-                                OutlinedTextField(value = wifiTelcoName, onValueChange = { wifiTelcoName = it }, label = { Text("Telco Name") }, modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
-                            } else {
-                                Text("Telco: $telcoName", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(top = 4.dp))
+                },
+                actions = {
+                    IconButton(onClick = { scope.launch { drawerState.open() } }) {
+                        Icon(Icons.Default.Settings, "Settings")
+                    }
+                }
+            )
+        }
+    ) { padding ->
+        LazyColumn(
+            modifier = Modifier.padding(padding).fillMaxSize().padding(horizontal = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            item {
+                // Site Header Info
+                Card(modifier = Modifier.fillMaxWidth().padding(top = 16.dp)) {
+                    Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedTextField(
+                                value = siteName,
+                                onValueChange = { siteName = it; isSiteNameConfirmed = false },
+                                label = { Text("Site Name") },
+                                modifier = Modifier.weight(1f),
+                                singleLine = true,
+                                isError = triedToProceed && siteName.isBlank(),
+                                trailingIcon = {
+                                    if (isSiteNameConfirmed) {
+                                        Icon(Icons.Default.CheckCircle, null, tint = ComposeColor(0xFF4CAF50))
+                                    } else {
+                                        IconButton(onClick = {
+                                            if (siteName.isNotBlank()) {
+                                                isSiteNameConfirmed = true
+                                                Toast.makeText(context, "Site name confirmed", Toast.LENGTH_SHORT).show()
+                                            }
+                                        }) {
+                                            Icon(Icons.Default.Check, null)
+                                        }
+                                    }
+                                }
+                            )
+                        }
+
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedTextField(value = lat, onValueChange = { lat = it }, label = { Text("Lat") }, modifier = Modifier.weight(1f), singleLine = true, isError = triedToProceed && lat.isBlank())
+                            OutlinedTextField(value = lng, onValueChange = { lng = it }, label = { Text("Lng") }, modifier = Modifier.weight(1f), singleLine = true, isError = triedToProceed && lng.isBlank())
+                        }
+
+                        Text(text = fullAddress, style = MaterialTheme.typography.bodySmall, maxLines = 2)
+
+                        // Telco Selection
+                        Text("Select Telco Brand", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            listOf("Globe", "Smart", "DITO", "Neutral").forEach { t ->
+                                FilterChip(
+                                    selected = telcoName == t,
+                                    onClick = { telcoName = t },
+                                    label = { Text(t, fontSize = 11.sp) },
+                                    modifier = Modifier.weight(1f)
+                                )
                             }
-                            Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                OutlinedTextField(value = lat, onValueChange = { lat = it }, label = { Text("Lat") }, modifier = Modifier.weight(1f))
-                                OutlinedTextField(value = lng, onValueChange = { lng = it }, label = { Text("Lng") }, modifier = Modifier.weight(1f))
+                        }
+                        if (telcoName == "Neutral") {
+                            OutlinedTextField(
+                                value = customTelcoName,
+                                onValueChange = { customTelcoName = it },
+                                label = { Text("Specify Telco") },
+                                modifier = Modifier.fillMaxWidth(),
+                                singleLine = true,
+                                isError = triedToProceed && customTelcoName.isBlank()
+                            )
+                        }
+
+                        // Vehicle Access Selection
+                        Text("Vehicle Access", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            listOf("4 Wheeled", "2 Wheeled", "Others").forEach { v ->
+                                FilterChip(
+                                    selected = vehicleAccess == v,
+                                    onClick = { vehicleAccess = v },
+                                    label = { Text(v, fontSize = 11.sp) },
+                                    modifier = Modifier.weight(1f)
+                                )
                             }
-                            Text(text = fullAddress, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp))
-                            
-                            Divider(modifier = Modifier.padding(vertical = 16.dp))
-                            Text("Vehicle Access", fontWeight = FontWeight.SemiBold)
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                RadioButton(selected = vehicleAccess == "2 Wheeled", onClick = { vehicleAccess = "2 Wheeled" })
-                                Text("2 Wheeled", fontSize = 14.sp)
-                                RadioButton(selected = vehicleAccess == "4 Wheeled", onClick = { vehicleAccess = "4 Wheeled" })
-                                Text("4 Wheeled", fontSize = 14.sp)
-                                RadioButton(selected = vehicleAccess == "Other", onClick = { vehicleAccess = "Other" })
-                                Text("Other", fontSize = 14.sp)
-                            }
-                            if (vehicleAccess == "Other") {
-                                OutlinedTextField(value = otherVehicleAccess, onValueChange = { otherVehicleAccess = it }, label = { Text("Specify") }, modifier = Modifier.fillMaxWidth())
-                            }
+                        }
+                        if (vehicleAccess == "Others") {
+                            OutlinedTextField(
+                                value = otherVehicleAccess,
+                                onValueChange = { otherVehicleAccess = it },
+                                label = { Text("Specify Access") },
+                                modifier = Modifier.fillMaxWidth(),
+                                singleLine = true
+                            )
+                        }
+                        
+                        if (customFolderName != null) {
+                            Text("Current Folder: $customFolderName", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold, fontSize = 12.sp)
                         }
                     }
                 }
+            }
 
-                items(sections) { section ->
+            items(sections) { section ->
                     CollapsibleTSSRSection(
                         sectionData = section,
-                        siteName = siteName,
-                        sessionTimestamp = sessionTimestamp,
                         lat = lat,
                         lng = lng,
-                        address = fullAddress,
                         images = sectionImages,
                         onStartCamera = { key, fieldName ->
-                            if (siteName.isBlank() && customFolderName.isNullOrBlank()) {
-                                Toast.makeText(context, "Please enter Site Name", Toast.LENGTH_SHORT).show()
+                            triedToProceed = true
+                            if (!isHeaderValid) {
+                                Toast.makeText(context, "Please fill in all required properties (Site Name, Coords, Telco) and confirm Site Name", Toast.LENGTH_SHORT).show()
                             } else {
                                 activeFieldKey = key
                                 activeFieldSection = section.title
                                 activeFieldName = fieldName
-                                createTSSRFile(context, siteName, section.title, fieldName, sessionTimestamp, customFolderName)?.let { file ->
-                                    val uri = FileProvider.getUriForFile(context, "com.example.isdp2java.fileprovider", file)
-                                    tempPhotoUriString = uri.toString()
-                                    tempFilePath = file.absolutePath
-                                    cameraLauncher.launch(uri)
+                                val hasCamera = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+                                if (!hasCamera) {
+                                    cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+                                } else {
+                                    FileUtils.createSurveyFile(context, "TSSR", siteName, section.title, fieldName, sessionTimestamp, customFolderName)?.let { file ->
+                                        tempFilePath = file.absolutePath
+                                        val uri = FileProvider.getUriForFile(context, "com.example.isdp2java.fileprovider", file)
+                                        tempPhotoUriString = uri.toString()
+                                        cameraLauncher.launch(uri)
+                                    }
                                 }
                             }
                         },
                         onStartGallery = { key, fieldName ->
-                            if (siteName.isBlank() && customFolderName.isNullOrBlank()) {
-                                Toast.makeText(context, "Please enter Site Name", Toast.LENGTH_SHORT).show()
+                            triedToProceed = true
+                            if (!isHeaderValid) {
+                                Toast.makeText(context, "Please fill in all required properties and confirm Site Name", Toast.LENGTH_SHORT).show()
                             } else {
                                 activeFieldKey = key
                                 activeFieldSection = section.title
@@ -508,7 +598,14 @@ fun TSSRScreen(initialFolder: String? = null, initialTelco: String? = null, onBa
                             viewerFieldSection = section.title
                             viewerFieldName = fieldName
                         },
-                        onScreenshot = { captureMapSnapshot() },
+                        onScreenshot = {
+                            triedToProceed = true
+                            if (!isHeaderValid) {
+                                Toast.makeText(context, "Please fill in all required properties and confirm Site Name", Toast.LENGTH_SHORT).show()
+                            } else {
+                                captureMapSnapshot()
+                            }
+                        },
                         mapRef = { mapRef = it }
                     )
                 }
@@ -516,7 +613,14 @@ fun TSSRScreen(initialFolder: String? = null, initialTelco: String? = null, onBa
                 item {
                     Spacer(Modifier.height(16.dp))
                     Button(
-                        onClick = { showReportOptions = true },
+                        onClick = {
+                            triedToProceed = true
+                            if (!isHeaderValid) {
+                                Toast.makeText(context, "Please fill in all required properties and confirm Site Name", Toast.LENGTH_SHORT).show()
+                            } else {
+                                showReportOptions = true
+                            }
+                        },
                         modifier = Modifier.fillMaxWidth().height(56.dp),
                         shape = RoundedCornerShape(12.dp)
                     ) {
@@ -528,209 +632,204 @@ fun TSSRScreen(initialFolder: String? = null, initialTelco: String? = null, onBa
                 }
             }
         }
-    }
 
-    if (showReportOptions) {
-        AlertDialog(
-            onDismissRequest = { showReportOptions = false },
-            title = { Text("Report Options") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    val finalTelco = if (telcoName == "Wifi") wifiTelcoName else telcoName
-                    Text("Telco: $finalTelco")
-                    Button(onClick = { 
-                        generatePDF(context, siteName, lat, lng, fullAddress, finalTelco, sections, sectionImages, customFolderName, sessionTimestamp)
-                        showReportOptions = false 
-                    }, modifier = Modifier.fillMaxWidth()) {
-                        Icon(Icons.Default.PictureAsPdf, null)
-                        Spacer(Modifier.width(8.dp))
-                        Text("Save as PDF")
+        if (showReportOptions) {
+            val finalTelco = if (telcoName == "Neutral" && customTelcoName.isNotBlank()) customTelcoName else telcoName
+            AlertDialog(
+                onDismissRequest = { showReportOptions = false },
+                title = { Text("Report Options") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("Telco: $finalTelco")
+                        Button(onClick = { 
+                            generatePDF(context, siteName, lat, lng, fullAddress, finalTelco, sections, sectionImages, customFolderName, sessionTimestamp)
+                            showReportOptions = false 
+                        }, modifier = Modifier.fillMaxWidth()) {
+                            Icon(Icons.Default.PictureAsPdf, null)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Save as PDF")
+                        }
+                        OutlinedButton(onClick = { 
+                            generateDocx(context, siteName, lat, lng, fullAddress, finalTelco, sections, sectionImages, customFolderName, sessionTimestamp)
+                            showReportOptions = false 
+                        }, modifier = Modifier.fillMaxWidth()) {
+                            Icon(Icons.Default.Description, null)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Save as DOCX")
+                        }
                     }
-                    OutlinedButton(onClick = { 
-                        generateDocx(context, siteName, lat, lng, fullAddress, finalTelco, sections, sectionImages, customFolderName, sessionTimestamp)
-                        showReportOptions = false 
-                    }, modifier = Modifier.fillMaxWidth()) {
-                        Icon(Icons.Default.Description, null)
-                        Spacer(Modifier.width(8.dp))
-                        Text("Save as DOCX")
-                    }
-                }
-            },
-            confirmButton = {},
-            dismissButton = { TextButton(onClick = { showReportOptions = false }) { Text("Cancel") } }
-        )
-    }
+                },
+                confirmButton = {},
+                dismissButton = { TextButton(onClick = { showReportOptions = false }) { Text("Cancel") } }
+            )
+        }
 
-    if (showCreateFolderDialog) {
-        var textValue by remember { mutableStateOf(customFolderName ?: "") }
-        AlertDialog(
-            onDismissRequest = { showCreateFolderDialog = false },
-            title = { Text("Set/Create Site Folder") },
-            text = {
-                Column {
-                    Text("Images will be saved in SMS_ISDP/[Name]", style = MaterialTheme.typography.bodySmall)
-                    Spacer(Modifier.height(8.dp))
-                    OutlinedTextField(
-                        value = textValue,
-                        onValueChange = { textValue = it },
-                        placeholder = { Text("Enter folder name") },
-                        singleLine = true
-                    )
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    if (textValue.isNotBlank()) {
-                        customFolderName = textValue
-                        // Physically create the folder
-                        scope.launch {
-                            withContext(Dispatchers.IO) {
-                                getSiteFolder(context, siteName, sessionTimestamp, textValue)
+        if (showCreateFolderDialog) {
+            var textValue by remember { mutableStateOf(customFolderName ?: "") }
+            AlertDialog(
+                onDismissRequest = { showCreateFolderDialog = false },
+                title = { Text("Set/Create Site Folder") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("This allows you to specify a custom directory name. Metadata will be shared within the folder.", style = MaterialTheme.typography.bodySmall)
+                        OutlinedTextField(
+                            value = textValue,
+                            onValueChange = { textValue = it },
+                            label = { Text("Folder Name") },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                },
+                confirmButton = {
+                    Button(onClick = {
+                        if (textValue.isNotBlank()) {
+                            customFolderName = textValue
+                            scope.launch { withContext(Dispatchers.IO) { FileUtils.getSurveyFolder(context, "TSSR", siteName, sessionTimestamp, textValue) } }
+                            showCreateFolderDialog = false
+                            Toast.makeText(context, "Folder set to: $textValue", Toast.LENGTH_SHORT).show()
+                        }
+                    }) { Text("Confirm") }
+                },
+                dismissButton = { TextButton(onClick = { showCreateFolderDialog = false }) { Text("Cancel") } }
+            )
+        }
+
+        if (showSelectFolderDialog) {
+            AlertDialog(
+                onDismissRequest = { showSelectFolderDialog = false },
+                title = { Text("Select Existing Site Folder") },
+                text = {
+                    LazyColumn(modifier = Modifier.heightIn(max = 400.dp)) {
+                        if (existingFolders.isEmpty()) {
+                            item { Text("No existing TSSR folders found.") }
+                        } else {
+                            items(existingFolders) { folder ->
+                                ListItem(
+                                    headlineContent = { Text(folder) },
+                                    modifier = Modifier.clickable {
+                                        customFolderName = folder
+                                        showSelectFolderDialog = false
+                                        Toast.makeText(context, "Folder selected: $folder", Toast.LENGTH_SHORT).show()
+                                    }
+                                )
                             }
                         }
-                        showCreateFolderDialog = false
-                        Toast.makeText(context, "Folder set to: $textValue", Toast.LENGTH_SHORT).show()
                     }
-                }) { Text("Save") }
-            },
-            dismissButton = {
-                TextButton(onClick = { showCreateFolderDialog = false }) { Text("Cancel") }
-            }
-        )
-    }
+                },
+                confirmButton = {},
+                dismissButton = { TextButton(onClick = { showSelectFolderDialog = false }) { Text("Cancel") } }
+            )
+        }
 
-    if (showSelectFolderDialog) {
-        AlertDialog(
-            onDismissRequest = { showSelectFolderDialog = false },
-            title = { Text("Select Existing Site Folder") },
-            text = {
-                if (existingFolders.isEmpty()) {
-                    Text("No folders found in SMS_ISDP")
-                } else {
-                    LazyColumn(modifier = Modifier.heightIn(max = 300.dp)) {
-                        items(existingFolders) { folder ->
-                            ListItem(
-                                headlineContent = { Text(folder) },
-                                leadingContent = { Icon(Icons.Default.FolderOpen, null) },
-                                modifier = Modifier.clickable {
-                                    customFolderName = folder
-                                    showSelectFolderDialog = false
-                                    Toast.makeText(context, "Folder selected: $folder", Toast.LENGTH_SHORT).show()
-                                }
-                            )
+        if (viewerUri != null) {
+            ImagePreviewDialog(
+                uri = viewerUri!!,
+                onDismiss = { viewerUri = null },
+                onRetake = {
+                    viewerUri = null
+                    activeFieldKey = viewerFieldKey
+                    activeFieldSection = viewerFieldSection
+                    activeFieldName = viewerFieldName
+                    val hasCamera = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+                    if (!hasCamera) cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+                    else {
+                        FileUtils.createSurveyFile(context, "TSSR", siteName, activeFieldSection!!, activeFieldName!!, sessionTimestamp, customFolderName)?.let { file ->
+                            tempFilePath = file.absolutePath
+                            val uri = FileProvider.getUriForFile(context, "com.example.isdp2java.fileprovider", file)
+                            tempPhotoUriString = uri.toString()
+                            cameraLauncher.launch(uri)
                         }
                     }
-                }
-            },
-            confirmButton = {},
-            dismissButton = { TextButton(onClick = { showSelectFolderDialog = false }) { Text("Close") } }
-        )
-    }
-
-    if (viewerUri != null) {
-        ImagePreviewDialog(
-            uri = viewerUri!!,
-            onDismiss = { viewerUri = null },
-            onRetake = {
-                val key = viewerFieldKey ?: ""
-                val section = viewerFieldSection ?: ""
-                val fieldName = viewerFieldName ?: "Photo"
-                if (key.contains("Vicinity Map")) {
-                    captureMapSnapshot()
-                } else {
-                    activeFieldKey = key
-                    activeFieldSection = section
-                    activeFieldName = fieldName
-                    createTSSRFile(context, siteName, section, fieldName, sessionTimestamp, customFolderName)?.let { file ->
-                        val uri = FileProvider.getUriForFile(context, "com.example.isdp2java.fileprovider", file)
-                        tempPhotoUriString = uri.toString()
-                        tempFilePath = file.absolutePath
-                        cameraLauncher.launch(uri)
-                    }
-                }
-                viewerUri = null
-            },
-            onGallery = {
-                activeFieldKey = viewerFieldKey
-                activeFieldSection = viewerFieldSection
-                activeFieldName = viewerFieldName
-                galleryLauncher.launch("image/*")
-                viewerUri = null
-            },
-            isMap = viewerFieldKey?.contains("Vicinity Map") == true
-        )
+                },
+                onGallery = {
+                    viewerUri = null
+                    activeFieldKey = viewerFieldKey
+                    activeFieldSection = viewerFieldSection
+                    activeFieldName = viewerFieldName
+                    galleryLauncher.launch("image/*")
+                },
+                isMap = viewerFieldName == "Vicinity Map"
+            )
+        }
     }
 }
 
-private fun getSiteFolder(context: Context, siteName: String, sessionTimestamp: String, customFolderName: String?): File? {
-    val appDir = context.getExternalFilesDir(null) ?: return null
-    val baseDir = File(appDir, "SMS_ISDP")
-    if (!baseDir.exists()) baseDir.mkdirs()
-    
-    val parentFolderName = if (!customFolderName.isNullOrBlank()) {
-        customFolderName!!.replace(Regex("[^a-zA-Z0-9_-]"), "_")
-    } else {
-        val sanitizedSiteName = siteName.ifBlank { "Untitled" }.replace(Regex("[^a-zA-Z0-9_-]"), "_")
-        "${sanitizedSiteName}_$sessionTimestamp"
-    }
-    val dir = File(baseDir, parentFolderName)
-    if (!dir.exists() && !dir.mkdirs()) return null
-    return dir
-}
-
-private fun generatePDF(context: Context, siteName: String, lat: String, lng: String, fullAddress: String, telco: String, sections: List<TSSRSectionData>, sectionImages: Map<String, Uri?>, customFolderName: String?, sessionTimestamp: String) {
-    val folder = getSiteFolder(context, siteName, sessionTimestamp, customFolderName) ?: return
-    val sanitizedSiteName = siteName.ifBlank { "Untitled" }.replace(Regex("[^a-zA-Z0-9_-]"), "_")
+private fun generatePDF(
+    context: Context,
+    siteName: String,
+    lat: String,
+    lng: String,
+    address: String,
+    telco: String,
+    sections: List<TSSRSectionData>,
+    images: Map<String, Uri?>,
+    customFolderName: String?,
+    sessionTime: String
+) {
+    val folder = FileUtils.getSurveyFolder(context, "TSSR", siteName, sessionTime, customFolderName) ?: return
+    val sanitizedSiteName = siteName.ifBlank { "TSSR_Untitled" }.replace(Regex("[^a-zA-Z0-9_-]"), "_")
     val dateStr = SimpleDateFormat("yyyyMMdd_HHmm", Locale.getDefault()).format(Date())
     val pdfFile = File(folder, "${sanitizedSiteName}_${dateStr}.pdf")
-    
     try {
         val writer = PdfWriter(pdfFile)
         val pdf = PdfDocument(writer)
         val document = Document(pdf)
-        
-        document.add(Paragraph("TSSR REPORT").setTextAlignment(TextAlignment.CENTER).setFontSize(20f).setBold())
+        document.add(Paragraph("TSSR SURVEY REPORT").setTextAlignment(TextAlignment.CENTER).setFontSize(20f).setBold())
         document.add(Paragraph("Telco: $telco").setBold())
         document.add(Paragraph("Site Name: $siteName"))
         document.add(Paragraph("Location: $lat, $lng"))
-        document.add(Paragraph("Address: $fullAddress"))
+        document.add(Paragraph("Address: $address"))
         document.add(Paragraph("Date: ${SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date())}"))
-        
+
         sections.forEach { section ->
-            val fieldImages = section.fields.filter { sectionImages["${section.title}_$it"] != null }
+            val fieldImages = section.fields.filter { field ->
+                field != "ADD_DYNAMIC" && field != "REMOVE_DYNAMIC" && images["${section.title}_$field"] != null
+            }
             if (fieldImages.isNotEmpty()) {
                 document.add(Paragraph("\n${section.title}").setBold().setFontSize(16f))
                 fieldImages.forEach { field ->
                     val key = "${section.title}_$field"
-                    val uri = sectionImages[key]
-                    if (uri != null) {
+                    images[key]?.let { uri ->
                         document.add(Paragraph(field).setFontSize(12f))
                         try {
                             context.contentResolver.openInputStream(uri)?.use { input ->
-                                val bytes = input.readBytes()
-                                val imageData = ImageDataFactory.create(bytes)
+                                val imageData = ImageDataFactory.create(input.readBytes())
                                 val pdfImage = com.itextpdf.layout.element.Image(imageData)
                                 pdfImage.setMaxWidth(500f)
                                 pdfImage.setMaxHeight(300f)
                                 document.add(pdfImage)
                             }
-                        } catch (e: Exception) {}
+                        } catch (e: Exception) {
+                            Log.e("TSSRScreen", "Failed to add image to PDF: $field", e)
+                        }
                     }
                 }
                 document.add(AreaBreak())
             }
         }
         document.close()
-        Toast.makeText(context, "PDF saved to ${folder.name}", Toast.LENGTH_LONG).show()
+        Toast.makeText(context, "TSSR PDF saved to folder", Toast.LENGTH_SHORT).show()
         MediaScannerConnection.scanFile(context, arrayOf(pdfFile.absolutePath), null, null)
     } catch (e: Exception) {
-        Log.e("TSSR", "PDF creation failed", e)
+        Log.e("TSSRScreen", "PDF creation failed", e)
+        Toast.makeText(context, "PDF creation failed: ${e.message}", Toast.LENGTH_LONG).show()
     }
 }
 
-private fun generateDocx(context: Context, siteName: String, lat: String, lng: String, fullAddress: String, telco: String, sections: List<TSSRSectionData>, sectionImages: Map<String, Uri?>, customFolderName: String?, sessionTimestamp: String) {
-    val folder = getSiteFolder(context, siteName, sessionTimestamp, customFolderName) ?: return
-    val sanitizedSiteName = siteName.ifBlank { "Untitled" }.replace(Regex("[^a-zA-Z0-9_-]"), "_")
+private fun generateDocx(
+    context: Context,
+    siteName: String,
+    lat: String,
+    lng: String,
+    address: String,
+    telco: String,
+    sections: List<TSSRSectionData>,
+    images: Map<String, Uri?>,
+    customFolderName: String?,
+    sessionTime: String
+) {
+    val folder = FileUtils.getSurveyFolder(context, "TSSR", siteName, sessionTime, customFolderName) ?: return
+    val sanitizedSiteName = siteName.ifBlank { "TSSR_Untitled" }.replace(Regex("[^a-zA-Z0-9_-]"), "_")
     val dateStr = SimpleDateFormat("yyyyMMdd_HHmm", Locale.getDefault()).format(Date())
     val docxFile = File(folder, "${sanitizedSiteName}_${dateStr}.docx")
 
@@ -741,7 +840,7 @@ private fun generateDocx(context: Context, siteName: String, lat: String, lng: S
         val titleRun = title.createRun()
         titleRun.isBold = true
         titleRun.fontSize = 20
-        titleRun.setText("TSSR REPORT")
+        titleRun.setText("TSSR SURVEY REPORT")
 
         val info = document.createParagraph()
         val infoRun = info.createRun()
@@ -751,12 +850,14 @@ private fun generateDocx(context: Context, siteName: String, lat: String, lng: S
         infoRun.addBreak()
         infoRun.setText("Location: $lat, $lng")
         infoRun.addBreak()
-        infoRun.setText("Address: $fullAddress")
+        infoRun.setText("Address: $address")
         infoRun.addBreak()
         infoRun.setText("Date: ${SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date())}")
 
         sections.forEach { section ->
-            val fieldImages = section.fields.filter { sectionImages["${section.title}_$it"] != null }
+            val fieldImages = section.fields.filter { field ->
+                field != "ADD_DYNAMIC" && field != "REMOVE_DYNAMIC" && images["${section.title}_$field"] != null
+            }
             if (fieldImages.isNotEmpty()) {
                 val sectionPara = document.createParagraph()
                 val sectionRun = sectionPara.createRun()
@@ -767,7 +868,7 @@ private fun generateDocx(context: Context, siteName: String, lat: String, lng: S
 
                 fieldImages.forEach { field ->
                     val key = "${section.title}_$field"
-                    val uri = sectionImages[key]
+                    val uri = images[key]
                     if (uri != null) {
                         val fieldPara = document.createParagraph()
                         val fieldRun = fieldPara.createRun()
@@ -777,7 +878,9 @@ private fun generateDocx(context: Context, siteName: String, lat: String, lng: S
                             context.contentResolver.openInputStream(uri)?.use { input ->
                                 fieldRun.addPicture(input, XWPFDocument.PICTURE_TYPE_JPEG, field, Units.toEMU(400.0), Units.toEMU(300.0))
                             }
-                        } catch (e: Exception) {}
+                        } catch (e: Exception) {
+                            Log.e("TSSRScreen", "Failed to add image to DOCX: $field", e)
+                        }
                     }
                 }
                 document.createParagraph().createRun().addBreak(BreakType.PAGE)
@@ -785,10 +888,11 @@ private fun generateDocx(context: Context, siteName: String, lat: String, lng: S
         }
         FileOutputStream(docxFile).use { out -> document.write(out) }
         document.close()
-        Toast.makeText(context, "DOCX saved to ${folder.name}", Toast.LENGTH_LONG).show()
+        Toast.makeText(context, "TSSR DOCX saved to folder", Toast.LENGTH_SHORT).show()
         MediaScannerConnection.scanFile(context, arrayOf(docxFile.absolutePath), null, null)
     } catch (e: Exception) {
-        Log.e("TSSR", "DOCX creation failed", e)
+        Log.e("TSSRScreen", "DOCX creation failed", e)
+        Toast.makeText(context, "DOCX creation failed: ${e.message}", Toast.LENGTH_LONG).show()
     }
 }
 
@@ -838,7 +942,17 @@ fun ImagePreviewDialog(uri: Uri, onDismiss: () -> Unit, onRetake: () -> Unit, on
 }
 
 @Composable
-fun CollapsibleTSSRSection(sectionData: TSSRSectionData, siteName: String, sessionTimestamp: String, lat: String, lng: String, address: String, images: Map<String, Uri?>, onStartCamera: (String, String) -> Unit, onStartGallery: (String, String) -> Unit, onImageClick: (String, Uri, String) -> Unit, onScreenshot: () -> Unit, mapRef: (MapView) -> Unit) {
+fun CollapsibleTSSRSection(
+    sectionData: TSSRSectionData,
+    lat: String,
+    lng: String,
+    images: Map<String, Uri?>,
+    onStartCamera: (String, String) -> Unit,
+    onStartGallery: (String, String) -> Unit,
+    onImageClick: (String, Uri, String) -> Unit,
+    onScreenshot: () -> Unit,
+    mapRef: (MapView) -> Unit
+) {
     var expanded by rememberSaveable { mutableStateOf(false) }
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(8.dp)) {
@@ -855,7 +969,24 @@ fun CollapsibleTSSRSection(sectionData: TSSRSectionData, siteName: String, sessi
                                 val key = "${sectionData.title}_$field"
                                 Box(modifier = Modifier.weight(1f)) {
                                     val isVicinityMap = field == "Vicinity Map"
-                                    TSSRPhotoField(label = field, currentUri = images[key], allowCamera = !isVicinityMap, onCameraClick = { if (images[key] == null) { if (isVicinityMap) onScreenshot() else onStartCamera(key, field) } else { onImageClick(key, images[key]!!, field) } }, onGalleryClick = { onStartGallery(key, field) }, isMap = isVicinityMap)
+                                    TSSRPhotoField(
+                                        label = field,
+                                        currentUri = images[key],
+                                        allowCamera = !isVicinityMap,
+                                        onCameraClick = {
+                                            if (images[key] == null) {
+                                                if (isVicinityMap) {
+                                                    onScreenshot()
+                                                } else {
+                                                    onStartCamera(key, field)
+                                                }
+                                            } else {
+                                                onImageClick(key, images[key]!!, field)
+                                            }
+                                        },
+                                        onGalleryClick = { onStartGallery(key, field) },
+                                        isMap = isVicinityMap
+                                    )
                                 }
                             }
                             if (rowFields.size == 1) Spacer(Modifier.weight(1f))
@@ -884,54 +1015,4 @@ fun VicinityMapView(lat: String, lng: String, onMapReady: (MapView) -> Unit) {
     Box(modifier = Modifier.fillMaxWidth().height(200.dp).clip(RoundedCornerShape(8.dp))) {
         AndroidView(factory = { ctx -> MapView(ctx).apply { setTileSource(TileSourceFactory.MAPNIK); setMultiTouchControls(true); controller.setZoom(18.0); val startPoint = GeoPoint(lat.toDoubleOrNull() ?: 14.59, lng.toDoubleOrNull() ?: 120.98); controller.setCenter(startPoint); val locationOverlay = MyLocationNewOverlay(GpsMyLocationProvider(ctx), this); locationOverlay.enableMyLocation(); overlays.add(locationOverlay); onMapReady(this) } }, update = { view -> val point = GeoPoint(lat.toDoubleOrNull() ?: 14.59, lng.toDoubleOrNull() ?: 120.98); view.controller.setCenter(point) })
     }
-}
-
-private fun getAddressFromLocation(context: Context, latitude: Double, longitude: Double): String {
-    return try {
-        val geocoder = Geocoder(context, Locale.getDefault())
-        val addresses = geocoder.getFromLocation(latitude, longitude, 1)
-        if (!addresses.isNullOrEmpty()) {
-            val addr = addresses[0]
-            "${addr.locality ?: ""}, ${addr.adminArea ?: ""}, ${addr.countryName ?: ""}\n${addr.getAddressLine(0) ?: ""}"
-        } else "Address not found"
-    } catch (e: Exception) { "Address detection failed" }
-}
-
-private fun createTSSRFile(context: Context, siteName: String, section: String, fieldName: String, sessionTime: String, customFolderName: String? = null): File? {
-    try {
-        val sanitizedSection = section.replace(Regex("[^a-zA-Z0-9_-]"), "_")
-        val sanitizedFieldName = fieldName.replace(Regex("[^a-zA-Z0-9_-]"), "_")
-        val date = SimpleDateFormat("yyyyMMdd", Locale.getDefault()).format(Date())
-        val time = SimpleDateFormat("HHmmss", Locale.getDefault()).format(Date())
-        val folder = getSiteFolder(context, siteName, sessionTime, customFolderName) ?: return null
-        val subDir = File(folder, sanitizedSection)
-        if (!subDir.exists() && !subDir.mkdirs()) return null
-        return File(subDir, "${sanitizedSection}_${sanitizedFieldName}_${date}_$time.jpg").apply { if (!exists()) createNewFile() }
-    } catch (e: Exception) { return null }
-}
-
-private fun addOverlayToImage(context: Context, uri: Uri, siteName: String, lat: String, lng: String, address: String): Uri? {
-    return try {
-        val originalBitmap = context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it) } ?: return uri
-        val mutableBitmap = originalBitmap.copy(Bitmap.Config.ARGB_8888, true)
-        val canvas = Canvas(mutableBitmap)
-        val paint = Paint().apply { color = Color.WHITE; textSize = originalBitmap.height / 45f; typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD); setShadowLayer(2f, 1f, 1f, Color.BLACK) }
-        val overlayText = """
-            Site Name: $siteName
-            Date: ${SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())}
-            Time: ${SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())}
-            Lat: $lat, Lng: $lng
-            $address
-        """.trimIndent().split("\n")
-        var y = mutableBitmap.height - (overlayText.size * paint.textSize * 1.2f) - 20f
-        for (line in overlayText) {
-            val textWidth = paint.measureText(line)
-            canvas.drawText(line, mutableBitmap.width - textWidth - 20f, y, paint)
-            y += paint.textSize * 1.2f
-        }
-        context.contentResolver.openOutputStream(uri)?.use { out -> mutableBitmap.compress(Bitmap.CompressFormat.JPEG, 90, out) }
-        if (originalBitmap != mutableBitmap) originalBitmap.recycle()
-        mutableBitmap.recycle()
-        uri
-    } catch (e: Exception) { uri }
 }

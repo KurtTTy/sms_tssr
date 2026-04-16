@@ -22,6 +22,6 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "isdp2(java)"
+rootProject.name = "SMS ISDP"
 include(":app")
  
