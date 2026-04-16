@@ -118,6 +118,13 @@ fun WifiScreen(
     var existingFolders by remember { mutableStateOf<List<String>>(emptyList()) }
 
     var showReportOptions by remember { mutableStateOf(false) }
+    var triedToProceed by rememberSaveable { mutableStateOf(false) }
+
+    val isHeaderValid = siteName.isNotBlank() && 
+            (isSiteNameConfirmed || !customFolderName.isNullOrBlank()) && 
+            lat.isNotBlank() && 
+            lng.isNotBlank() && 
+            ((telcoName != "Wifi" && telcoName != "Neutral") || customTelcoName.isNotBlank())
 
     val fusedLocationClient = remember { LocationServices.getFusedLocationProviderClient(context) }
 
@@ -131,7 +138,7 @@ fun WifiScreen(
                         lng = location.longitude.toString()
                         scope.launch {
                             fullAddress = withContext(Dispatchers.IO) {
-                                getAddressFromLocation(context, location.latitude, location.longitude)
+                                FileUtils.getAddressFromLocation(context, location.latitude, location.longitude)
                             }
                         }
                     }
@@ -224,6 +231,11 @@ fun WifiScreen(
                                 }
                             }
                         }
+                    } else {
+                        withContext(Dispatchers.Main) {
+                            siteName = initialFolder
+                            if (siteName.isNotBlank()) isSiteNameConfirmed = true
+                        }
                     }
                 }
             }
@@ -279,7 +291,7 @@ fun WifiScreen(
                         scope.launch {
                             if (fullAddress == "Detecting location...") {
                                 fullAddress = withContext(Dispatchers.IO) {
-                                    getAddressFromLocation(context, location.latitude, location.longitude)
+                                    FileUtils.getAddressFromLocation(context, location.latitude, location.longitude)
                                 }
                             }
                         }
@@ -335,15 +347,25 @@ fun WifiScreen(
 
     var mapRef by remember { mutableStateOf<MapView?>(null) }
 
-    fun captureMapSnapshot() {
+    fun captureMapSnapshot(isResnap: Boolean = false) {
         val map = mapRef ?: return
+        
+        // Ensure the map is laid out and has dimensions
+        if (map.width <= 0 || map.height <= 0) {
+            Toast.makeText(context, "Map not ready for snapshot", Toast.LENGTH_SHORT).show()
+            return
+        }
+
         val key = "Site Location_Vicinity Map"
         val section = "Site Location"
         val fieldName = "Vicinity Map"
         
+        // Use a more unique name if resnapping to avoid cache/overlap issues
+        val resnapSuffix = if (isResnap) "_resnap_${System.currentTimeMillis()}" else ""
+        
         scope.launch {
             val destFile = withContext(Dispatchers.IO) {
-                FileUtils.createSurveyFile(context, "Wifi", siteName, section, fieldName, sessionTimestamp, customFolderName)
+                FileUtils.createSurveyFile(context, "Wifi", siteName, section, fieldName, sessionTimestamp, customFolderName, suffix = resnapSuffix)
             }
             destFile?.let { file ->
                 val bitmap = Bitmap.createBitmap(map.width, map.height, Bitmap.Config.ARGB_8888)
@@ -366,6 +388,7 @@ fun WifiScreen(
                     viewerFieldSection = section
                     viewerFieldName = fieldName
                     MediaScannerConnection.scanFile(context, arrayOf(file.absolutePath), null, null)
+                    Toast.makeText(context, "Map snapshot captured", Toast.LENGTH_SHORT).show()
                 }
                 bitmap.recycle()
             }
@@ -487,13 +510,14 @@ fun WifiScreen(
                                 label = { Text("Site Name") },
                                 modifier = Modifier.fillMaxWidth(),
                                 singleLine = true,
+                                isError = triedToProceed && (siteName.isBlank() || (!isSiteNameConfirmed && customFolderName.isNullOrBlank())),
                                 trailingIcon = {
                                     if (siteName.isNotBlank()) {
                                         IconButton(onClick = { 
                                             isSiteNameConfirmed = true
                                             Toast.makeText(context, "Confirmed: $siteName", Toast.LENGTH_SHORT).show()
                                         }) {
-                                            Icon(imageVector = if (isSiteNameConfirmed) Icons.Default.CheckCircle else Icons.Default.Check, contentDescription = null)
+                                            Icon(imageVector = if (isSiteNameConfirmed) Icons.Default.CheckCircle else Icons.Default.Check, contentDescription = null, tint = if (isSiteNameConfirmed) ComposeColor(0xFF4CAF50) else LocalContentColor.current)
                                         }
                                     }
                                 }
@@ -504,14 +528,20 @@ fun WifiScreen(
                                     onValueChange = { customTelcoName = it },
                                     label = { Text("Enter Telco Name") },
                                     modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-                                    singleLine = true
+                                    singleLine = true,
+                                    isError = triedToProceed && customTelcoName.isBlank(),
+                                    trailingIcon = {
+                                        if (customTelcoName.isNotBlank()) {
+                                            Icon(Icons.Default.CheckCircle, null, tint = ComposeColor(0xFF4CAF50))
+                                        }
+                                    }
                                 )
                             } else {
                                 Text("Telco: $telcoName", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(top = 4.dp))
                             }
                             Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                OutlinedTextField(value = lat, onValueChange = { lat = it }, label = { Text("Lat") }, modifier = Modifier.weight(1f))
-                                OutlinedTextField(value = lng, onValueChange = { lng = it }, label = { Text("Lng") }, modifier = Modifier.weight(1f))
+                                OutlinedTextField(value = lat, onValueChange = { lat = it }, label = { Text("Lat") }, modifier = Modifier.weight(1f), isError = triedToProceed && lat.isBlank())
+                                OutlinedTextField(value = lng, onValueChange = { lng = it }, label = { Text("Lng") }, modifier = Modifier.weight(1f), isError = triedToProceed && lng.isBlank())
                             }
                             Text(text = fullAddress, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp))
                         }
@@ -530,8 +560,9 @@ fun WifiScreen(
                         address = fullAddress,
                         images = sectionImages,
                         onStartCamera = { key, fieldName ->
-                            if ((siteName.isBlank() || !isSiteNameConfirmed) && customFolderName.isNullOrBlank()) {
-                                Toast.makeText(context, "Please confirm Site Name first", Toast.LENGTH_SHORT).show()
+                            triedToProceed = true
+                            if (!isHeaderValid) {
+                                Toast.makeText(context, "Please fill in all required properties (Site Name, Coords, Telco) and confirm Site Name", Toast.LENGTH_SHORT).show()
                             } else {
                                 activeFieldKey = key
                                 activeFieldSection = section.title
@@ -548,8 +579,9 @@ fun WifiScreen(
                             }
                         },
                         onStartGallery = { key, fieldName ->
-                            if ((siteName.isBlank() || !isSiteNameConfirmed) && customFolderName.isNullOrBlank()) {
-                                Toast.makeText(context, "Please confirm Site Name first", Toast.LENGTH_SHORT).show()
+                            triedToProceed = true
+                            if (!isHeaderValid) {
+                                Toast.makeText(context, "Please fill in all required properties (Site Name, Coords, Telco) and confirm Site Name", Toast.LENGTH_SHORT).show()
                             } else {
                                 activeFieldKey = key
                                 activeFieldSection = section.title
@@ -564,16 +596,18 @@ fun WifiScreen(
                             viewerFieldName = fieldName
                         },
                         onScreenshot = {
-                            if ((siteName.isBlank() || !isSiteNameConfirmed) && customFolderName.isNullOrBlank()) {
-                                Toast.makeText(context, "Please confirm Site Name first", Toast.LENGTH_SHORT).show()
+                            triedToProceed = true
+                            if (!isHeaderValid) {
+                                Toast.makeText(context, "Please fill in all required properties (Site Name, Coords, Telco) and confirm Site Name", Toast.LENGTH_SHORT).show()
                             } else {
                                 captureMapSnapshot()
                             }
                         },
                         mapRef = { mapRef = it },
                         onAddClick = { title ->
-                            if ((siteName.isBlank() || !isSiteNameConfirmed) && customFolderName.isNullOrBlank()) {
-                                Toast.makeText(context, "Please confirm Site Name first", Toast.LENGTH_SHORT).show()
+                            triedToProceed = true
+                            if (!isHeaderValid) {
+                                Toast.makeText(context, "Please fill in all required properties (Site Name, Coords, Telco) and confirm Site Name", Toast.LENGTH_SHORT).show()
                             } else {
                                 when (title) {
                                     "AP Location" -> if (apLocationCount < 50) apLocationCount++
@@ -584,8 +618,9 @@ fun WifiScreen(
                             }
                         },
                         onRemoveClick = { title ->
-                            if ((siteName.isBlank() || !isSiteNameConfirmed) && customFolderName.isNullOrBlank()) {
-                                Toast.makeText(context, "Please confirm Site Name first", Toast.LENGTH_SHORT).show()
+                            triedToProceed = true
+                            if (!isHeaderValid) {
+                                Toast.makeText(context, "Please fill in all required properties (Site Name, Coords, Telco) and confirm Site Name", Toast.LENGTH_SHORT).show()
                             } else {
                                 when (title) {
                                     "AP Location" -> if (apLocationCount > 5) apLocationCount--
@@ -602,8 +637,9 @@ fun WifiScreen(
                     Spacer(Modifier.height(16.dp))
                     Button(
                         onClick = {
-                            if ((siteName.isBlank() || !isSiteNameConfirmed) && customFolderName.isNullOrBlank()) {
-                                Toast.makeText(context, "Please confirm Site Name first", Toast.LENGTH_SHORT).show()
+                            triedToProceed = true
+                            if (!isHeaderValid) {
+                                Toast.makeText(context, "Please fill in all required properties (Site Name, Coords, Telco) and confirm Site Name", Toast.LENGTH_SHORT).show()
                             } else {
                                 showReportOptions = true
                             }
@@ -672,7 +708,7 @@ fun WifiScreen(
                         customFolderName = textValue
                         scope.launch {
                             withContext(Dispatchers.IO) {
-                                getWifiFolder(context, siteName, sessionTimestamp, textValue)
+                                FileUtils.getSurveyFolder(context, "Wifi", siteName, sessionTimestamp, textValue)
                             }
                         }
                         showCreateFolderDialog = false
@@ -723,7 +759,7 @@ fun WifiScreen(
                 val section = viewerFieldSection ?: ""
                 val fieldName = viewerFieldName ?: "Photo"
                 if (key.contains("Vicinity Map")) {
-                    captureMapSnapshot()
+                    captureMapSnapshot(isResnap = true)
                 } else {
                     activeFieldKey = key
                     activeFieldSection = section
@@ -913,6 +949,7 @@ fun WifiVicinityMapView(lat: String, lng: String, onMapReady: (MapView) -> Unit)
                 MapView(ctx).apply {
                     setTileSource(TileSourceFactory.MAPNIK)
                     setMultiTouchControls(true)
+                    zoomController.setVisibility(org.osmdroid.views.CustomZoomButtonsController.Visibility.NEVER)
                     controller.setZoom(18.0)
                     val startPoint = GeoPoint(lat.toDoubleOrNull() ?: 14.59, lng.toDoubleOrNull() ?: 120.98)
                     controller.setCenter(startPoint)
@@ -922,44 +959,21 @@ fun WifiVicinityMapView(lat: String, lng: String, onMapReady: (MapView) -> Unit)
                     onMapReady(this)
                 }
             },
-            update = { view ->
-                val point = GeoPoint(lat.toDoubleOrNull() ?: 14.59, lng.toDoubleOrNull() ?: 120.98)
-                view.controller.setCenter(point)
-            }
+            update = { /* Do nothing in update to preserve user zoom/pan */ }
         )
     }
 }
 
-private fun getWifiFolder(context: Context, siteName: String, sessionTimestamp: String, customFolderName: String?): File? {
-    val baseDir = File(Environment.getExternalStorageDirectory(), "SMS_ISDP")
-    if (!baseDir.exists()) baseDir.mkdirs()
-    
-    val parentFolderName = if (!customFolderName.isNullOrBlank()) {
-        customFolderName!!.replace(Regex("[^a-zA-Z0-9_-]"), "_")
-    } else {
-        val sanitizedSiteName = siteName.ifBlank { "Wifi_Untitled" }.replace(Regex("[^a-zA-Z0-9_-]"), "_")
-        "${sanitizedSiteName}_$sessionTimestamp"
-    }
-    val dir = File(baseDir, parentFolderName)
-    if (!dir.exists() && !dir.mkdirs()) return null
-    return dir
+private fun getAddressFromLocation(context: Context, latitude: Double, longitude: Double): String {
+    return FileUtils.getAddressFromLocation(context, latitude, longitude)
 }
 
-private fun createWifiFile(context: Context, siteName: String, section: String, fieldName: String, sessionTime: String, customFolderName: String?): File? {
-    try {
-        val sanitizedSection = section.replace(Regex("[^a-zA-Z0-9_-]"), "_")
-        val sanitizedFieldName = fieldName.replace(Regex("[^a-zA-Z0-9_-]"), "_")
-        val date = SimpleDateFormat("yyyyMMdd", Locale.getDefault()).format(Date())
-        val time = SimpleDateFormat("HHmmss", Locale.getDefault()).format(Date())
-        val folder = getWifiFolder(context, siteName, sessionTime, customFolderName) ?: return null
-        val subDir = File(folder, sanitizedSection)
-        if (!subDir.exists() && !subDir.mkdirs()) return null
-        return File(subDir, "${sanitizedSection}_${sanitizedFieldName}_${date}_$time.jpg").apply { if (!exists()) createNewFile() }
-    } catch (e: Exception) { return null }
+private fun addOverlayToImage(context: Context, uri: Uri, siteName: String, lat: String, lng: String, address: String): Uri? {
+    return FileUtils.addOverlayToImage(context, uri, siteName, lat, lng, address)
 }
 
 private fun generateWifiPDF(context: Context, siteName: String, lat: String, lng: String, address: String, telco: String, sections: List<TSSRSectionData>, images: Map<String, Uri?>, customFolderName: String?, sessionTime: String) {
-    val folder = getWifiFolder(context, siteName, sessionTime, customFolderName) ?: return
+    val folder = FileUtils.getSurveyFolder(context, "Wifi", siteName, sessionTime, customFolderName) ?: return
     val sanitizedSiteName = siteName.ifBlank { "Wifi_Untitled" }.replace(Regex("[^a-zA-Z0-9_-]"), "_")
     val dateStr = SimpleDateFormat("yyyyMMdd_HHmm", Locale.getDefault()).format(Date())
     val pdfFile = File(folder, "${sanitizedSiteName}_${dateStr}.pdf")
@@ -1007,7 +1021,7 @@ private fun generateWifiPDF(context: Context, siteName: String, lat: String, lng
 }
 
 private fun generateWifiDocx(context: Context, siteName: String, lat: String, lng: String, address: String, telco: String, sections: List<TSSRSectionData>, images: Map<String, Uri?>, customFolderName: String?, sessionTime: String) {
-    val folder = getWifiFolder(context, siteName, sessionTime, customFolderName) ?: return
+    val folder = FileUtils.getSurveyFolder(context, "Wifi", siteName, sessionTime, customFolderName) ?: return
     val sanitizedSiteName = siteName.ifBlank { "Wifi_Untitled" }.replace(Regex("[^a-zA-Z0-9_-]"), "_")
     val dateStr = SimpleDateFormat("yyyyMMdd_HHmm", Locale.getDefault()).format(Date())
     val docxFile = File(folder, "${sanitizedSiteName}_${dateStr}.docx")
@@ -1072,10 +1086,4 @@ private fun generateWifiDocx(context: Context, siteName: String, lat: String, ln
     }
 }
 
-private fun getAddressFromLocation(context: Context, latitude: Double, longitude: Double): String {
-    return FileUtils.getAddressFromLocation(context, latitude, longitude)
-}
 
-private fun addOverlayToImage(context: Context, uri: Uri, siteName: String, lat: String, lng: String, address: String): Uri? {
-    return FileUtils.addOverlayToImage(context, uri, siteName, lat, lng, address)
-}

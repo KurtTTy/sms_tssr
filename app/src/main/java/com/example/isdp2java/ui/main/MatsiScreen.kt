@@ -116,6 +116,13 @@ fun MatsiScreen(
     var existingFolders by remember { mutableStateOf<List<String>>(emptyList()) }
 
     var showReportOptions by remember { mutableStateOf(false) }
+    var triedToProceed by rememberSaveable { mutableStateOf(false) }
+
+    val isHeaderValid = siteName.isNotBlank() && 
+            (isSiteNameConfirmed || !customFolderName.isNullOrBlank()) && 
+            lat.isNotBlank() && 
+            lng.isNotBlank() && 
+            ((telcoName != "Matsi" && telcoName != "Neutral") || customTelcoName.isNotBlank())
 
     val fusedLocationClient = remember { LocationServices.getFusedLocationProviderClient(context) }
 
@@ -166,7 +173,7 @@ fun MatsiScreen(
             activeFieldKey?.let { key ->
                 activeFieldSection?.let { section ->
                     activeFieldName?.let { field ->
-                        FileUtils.createSurveyFile(context, siteName, "Matsi", section, field, sessionTimestamp, customFolderName)?.let { file ->
+                        FileUtils.createSurveyFile(context, "Matsi", siteName, section, field, sessionTimestamp, customFolderName)?.let { file ->
                             val uri = FileProvider.getUriForFile(context, "com.example.isdp2java.fileprovider", file)
                             tempPhotoUriString = uri.toString()
                             cameraLauncher.launch(uri)
@@ -332,15 +339,25 @@ fun MatsiScreen(
     var mapRef by remember { mutableStateOf<MapView?>(null) }
     var activeMapSectionIndex by remember { mutableStateOf(-1) }
 
-    fun captureMapSnapshot(sectionIndex: Int) {
+    fun captureMapSnapshot(sectionIndex: Int, isResnap: Boolean = false) {
         val map = mapRef ?: return
+
+        // Ensure the map is laid out and has dimensions
+        if (map.width <= 0 || map.height <= 0) {
+            Toast.makeText(context, "Map not ready for snapshot", Toast.LENGTH_SHORT).show()
+            return
+        }
+
         val sectionTitle = "Section ${sectionIndex + 1}"
         val fieldName = "GPS Reading"
         val key = "${sectionTitle}_$fieldName"
         
+        // Use a more unique name if resnapping to avoid cache/overlap issues
+        val resnapSuffix = if (isResnap) "_resnap_${System.currentTimeMillis()}" else ""
+
         scope.launch {
             val destFile = withContext(Dispatchers.IO) {
-                FileUtils.createSurveyFile(context, "Matsi", siteName, sectionTitle, fieldName, sessionTimestamp, customFolderName)
+                FileUtils.createSurveyFile(context, "Matsi", siteName, sectionTitle, fieldName, sessionTimestamp, customFolderName, suffix = resnapSuffix)
             }
             destFile?.let { file ->
                 val bitmap = Bitmap.createBitmap(map.width, map.height, Bitmap.Config.ARGB_8888)
@@ -363,6 +380,7 @@ fun MatsiScreen(
                     viewerFieldSection = sectionTitle
                     viewerFieldName = fieldName
                     MediaScannerConnection.scanFile(context, arrayOf(file.absolutePath), null, null)
+                    Toast.makeText(context, "Map snapshot captured", Toast.LENGTH_SHORT).show()
                 }
                 bitmap.recycle()
             }
@@ -456,13 +474,14 @@ fun MatsiScreen(
                                 label = { Text("Site Name") },
                                 modifier = Modifier.fillMaxWidth(),
                                 singleLine = true,
+                                isError = triedToProceed && (siteName.isBlank() || (!isSiteNameConfirmed && customFolderName.isNullOrBlank())),
                                 trailingIcon = {
                                     if (siteName.isNotBlank()) {
                                         IconButton(onClick = { 
                                             isSiteNameConfirmed = true
                                             Toast.makeText(context, "Confirmed: $siteName", Toast.LENGTH_SHORT).show()
                                         }) {
-                                            Icon(imageVector = if (isSiteNameConfirmed) Icons.Default.CheckCircle else Icons.Default.Check, contentDescription = null)
+                                            Icon(imageVector = if (isSiteNameConfirmed) Icons.Default.CheckCircle else Icons.Default.Check, contentDescription = null, tint = if (isSiteNameConfirmed) ComposeColor(0xFF4CAF50) else LocalContentColor.current)
                                         }
                                     }
                                 }
@@ -473,14 +492,20 @@ fun MatsiScreen(
                                     onValueChange = { customTelcoName = it },
                                     label = { Text("Enter Telco Name") },
                                     modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-                                    singleLine = true
+                                    singleLine = true,
+                                    isError = triedToProceed && customTelcoName.isBlank(),
+                                    trailingIcon = {
+                                        if (customTelcoName.isNotBlank()) {
+                                            Icon(Icons.Default.CheckCircle, null, tint = ComposeColor(0xFF4CAF50))
+                                        }
+                                    }
                                 )
                             } else {
                                 Text("Telco: $telcoName", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(top = 4.dp))
                             }
                             Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                OutlinedTextField(value = lat, onValueChange = { lat = it }, label = { Text("Lat") }, modifier = Modifier.weight(1f))
-                                OutlinedTextField(value = lng, onValueChange = { lng = it }, label = { Text("Lng") }, modifier = Modifier.weight(1f))
+                                OutlinedTextField(value = lat, onValueChange = { lat = it }, label = { Text("Lat") }, modifier = Modifier.weight(1f), isError = triedToProceed && lat.isBlank())
+                                OutlinedTextField(value = lng, onValueChange = { lng = it }, label = { Text("Lng") }, modifier = Modifier.weight(1f), isError = triedToProceed && lng.isBlank())
                             }
                             Text(text = fullAddress, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp))
                         }
@@ -500,8 +525,9 @@ fun MatsiScreen(
                         address = fullAddress,
                         images = sectionImages,
                         onStartCamera = { key, fieldName ->
-                            if ((siteName.isBlank() || !isSiteNameConfirmed) && customFolderName.isNullOrBlank()) {
-                                Toast.makeText(context, "Please confirm Site Name first", Toast.LENGTH_SHORT).show()
+                            triedToProceed = true
+                            if (!isHeaderValid) {
+                                Toast.makeText(context, "Please fill in all required properties (Site Name, Coords, Telco) and confirm Site Name", Toast.LENGTH_SHORT).show()
                             } else {
                                 activeFieldKey = key
                                 activeFieldSection = section.title
@@ -518,8 +544,9 @@ fun MatsiScreen(
                             }
                         },
                         onStartGallery = { key, fieldName ->
-                            if ((siteName.isBlank() || !isSiteNameConfirmed) && customFolderName.isNullOrBlank()) {
-                                Toast.makeText(context, "Please confirm Site Name first", Toast.LENGTH_SHORT).show()
+                            triedToProceed = true
+                            if (!isHeaderValid) {
+                                Toast.makeText(context, "Please fill in all required properties (Site Name, Coords, Telco) and confirm Site Name", Toast.LENGTH_SHORT).show()
                             } else {
                                 activeFieldKey = key
                                 activeFieldSection = section.title
@@ -534,8 +561,9 @@ fun MatsiScreen(
                             viewerFieldName = fieldName
                         },
                         onScreenshot = {
-                            if ((siteName.isBlank() || !isSiteNameConfirmed) && customFolderName.isNullOrBlank()) {
-                                Toast.makeText(context, "Please confirm Site Name first", Toast.LENGTH_SHORT).show()
+                            triedToProceed = true
+                            if (!isHeaderValid) {
+                                Toast.makeText(context, "Please fill in all required properties (Site Name, Coords, Telco) and confirm Site Name", Toast.LENGTH_SHORT).show()
                             } else {
                                 captureMapSnapshot(index)
                             }
@@ -551,8 +579,9 @@ fun MatsiScreen(
                     if (sectionCount < 10) {
                         Button(
                             onClick = { 
-                                if ((siteName.isBlank() || !isSiteNameConfirmed) && customFolderName.isNullOrBlank()) {
-                                    Toast.makeText(context, "Please confirm Site Name first", Toast.LENGTH_SHORT).show()
+                                triedToProceed = true
+                                if (!isHeaderValid) {
+                                    Toast.makeText(context, "Please fill in all required properties (Site Name, Coords, Telco) and confirm Site Name", Toast.LENGTH_SHORT).show()
                                 } else {
                                     sectionCount++ 
                                 }
@@ -571,8 +600,9 @@ fun MatsiScreen(
                     Spacer(Modifier.height(16.dp))
                     Button(
                         onClick = {
-                            if ((siteName.isBlank() || !isSiteNameConfirmed) && customFolderName.isNullOrBlank()) {
-                                Toast.makeText(context, "Please confirm Site Name first", Toast.LENGTH_SHORT).show()
+                            triedToProceed = true
+                            if (!isHeaderValid) {
+                                Toast.makeText(context, "Please fill in all required properties (Site Name, Coords, Telco) and confirm Site Name", Toast.LENGTH_SHORT).show()
                             } else {
                                 showReportOptions = true
                             }
@@ -693,7 +723,11 @@ fun MatsiScreen(
                 val fieldName = viewerFieldName ?: "Photo"
                 if (fieldName == "GPS Reading") {
                     val sIdx = section.substringAfter("Section ").toIntOrNull()?.minus(1) ?: -1
-                    if (sIdx != -1) captureMapSnapshot(sIdx)
+                    if (sIdx != -1) {
+                        // Clear the existing map image so the user can take a new one
+                        sectionImages.remove(key)
+                        captureMapSnapshot(sIdx, isResnap = true)
+                    }
                 } else {
                     activeFieldKey = key
                     activeFieldSection = section
@@ -829,6 +863,7 @@ fun MatsiVicinityMapView(lat: String, lng: String, onMapReady: (MapView) -> Unit
                 MapView(ctx).apply {
                     setTileSource(TileSourceFactory.MAPNIK)
                     setMultiTouchControls(true)
+                    zoomController.setVisibility(org.osmdroid.views.CustomZoomButtonsController.Visibility.NEVER)
                     controller.setZoom(18.0)
                     val startPoint = GeoPoint(lat.toDoubleOrNull() ?: 14.59, lng.toDoubleOrNull() ?: 120.98)
                     controller.setCenter(startPoint)
@@ -838,20 +873,17 @@ fun MatsiVicinityMapView(lat: String, lng: String, onMapReady: (MapView) -> Unit
                     onMapReady(this)
                 }
             },
-            update = { view ->
-                val point = GeoPoint(lat.toDoubleOrNull() ?: 14.59, lng.toDoubleOrNull() ?: 120.98)
-                view.controller.setCenter(point)
-            }
+            update = { /* Do nothing in update to preserve user zoom/pan */ }
         )
     }
 }
 
 private fun getMatsiFolder(context: Context, siteName: String, sessionTimestamp: String, customFolderName: String?): File? {
-    return FileUtils.getSurveyFolder(context, siteName, "Matsi", sessionTimestamp, customFolderName)
+    return FileUtils.getSurveyFolder(context, "Matsi", siteName, sessionTimestamp, customFolderName)
 }
 
 private fun createMatsiFile(context: Context, siteName: String, section: String, fieldName: String, sessionTime: String, customFolderName: String?): File? {
-    return FileUtils.createSurveyFile(context, siteName, "Matsi", section, fieldName, sessionTime, customFolderName)
+    return FileUtils.createSurveyFile(context, "Matsi", siteName, section, fieldName, sessionTime, customFolderName)
 }
 
 private fun generateMatsiPDF(context: Context, siteName: String, lat: String, lng: String, address: String, telco: String, sections: List<TSSRSectionData>, images: Map<String, Uri?>, customFolderName: String?, sessionTime: String) {

@@ -9,6 +9,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -29,6 +30,7 @@ import java.io.File
 @Composable
 fun MainScreen(
     onThemeToggle: () -> Unit,
+    onLogout: () -> Unit,
     tssrFolder: String?,
     wifiFolder: String?,
     matsiFolder: String?,
@@ -146,6 +148,18 @@ fun MainScreen(
                         icon = { Icon(Icons.Default.Delete, null) }
                     )
                 }
+
+                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+
+                NavigationDrawerItem(
+                    label = { Text("Logout") },
+                    selected = false,
+                    onClick = {
+                        scope.launch { drawerState.close() }
+                        onLogout()
+                    },
+                    icon = { Icon(Icons.AutoMirrored.Filled.Logout, null) }
+                )
             }
         }
     ) {

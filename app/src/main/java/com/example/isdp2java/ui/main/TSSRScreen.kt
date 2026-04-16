@@ -50,6 +50,7 @@ import kotlinx.coroutines.withContext
 import org.osmdroid.config.Configuration
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory
 import org.osmdroid.util.GeoPoint
+import org.osmdroid.views.CustomZoomButtonsController
 import org.osmdroid.views.MapView
 import org.osmdroid.views.overlay.mylocation.GpsMyLocationProvider
 import org.osmdroid.views.overlay.mylocation.MyLocationNewOverlay
@@ -354,35 +355,50 @@ fun TSSRScreen(
 
     var mapRef by remember { mutableStateOf<MapView?>(null) }
 
-    fun captureMapSnapshot() {
+    fun captureMapSnapshot(isResnap: Boolean = false) {
         val map = mapRef ?: return
-        val bitmap = Bitmap.createBitmap(map.width, map.height, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(bitmap)
-        map.draw(canvas)
+        
+        // Ensure the map is laid out and has dimensions
+        if (map.width <= 0 || map.height <= 0) {
+            Toast.makeText(context, "Map not ready for snapshot", Toast.LENGTH_SHORT).show()
+            return
+        }
 
         val key = "A3.1 Site Location_Vicinity Map"
-        val folder = FileUtils.getSurveyFolder(context, "TSSR", siteName, sessionTimestamp, customFolderName) ?: return
-        val subDir = File(folder, "A3_1_Site_Location")
-        if (!subDir.exists()) subDir.mkdirs()
-
-        val file = File(subDir, "A3_1_Site_Location_Vicinity_Map_${sessionTimestamp}.jpg")
-        FileOutputStream(file).use { out ->
-            bitmap.compress(Bitmap.CompressFormat.JPEG, 90, out)
-        }
-        val uri = FileProvider.getUriForFile(context, "com.example.isdp2java.fileprovider", file)
+        val section = "A3.1 Site Location"
+        val fieldName = "Vicinity Map"
+        
+        // Use a more unique name if resnapping to avoid cache/overlap issues
+        val resnapSuffix = if (isResnap) "_resnap_${System.currentTimeMillis()}" else ""
         
         scope.launch {
-            val overlaidUri = withContext(Dispatchers.IO) {
-                FileUtils.addOverlayToImage(context, uri, siteName, lat, lng, fullAddress)
+            val destFile = withContext(Dispatchers.IO) {
+                FileUtils.createSurveyFile(context, "TSSR", siteName, section, fieldName, sessionTimestamp, customFolderName, suffix = resnapSuffix)
             }
-            overlaidUri?.let {
-                sectionImages[key] = it
-                viewerUri = it
-                viewerFieldKey = key
-                viewerFieldSection = "A3.1 Site Location"
-                viewerFieldName = "Vicinity Map"
-                MediaScannerConnection.scanFile(context, arrayOf(file.absolutePath), null, null)
-                Toast.makeText(context, "Map snapshot captured", Toast.LENGTH_SHORT).show()
+            destFile?.let { file ->
+                val bitmap = Bitmap.createBitmap(map.width, map.height, Bitmap.Config.ARGB_8888)
+                val canvas = Canvas(bitmap)
+                map.draw(canvas)
+                
+                withContext(Dispatchers.IO) {
+                    FileOutputStream(file).use { out ->
+                        bitmap.compress(Bitmap.CompressFormat.JPEG, 90, out)
+                    }
+                }
+                val uri = FileProvider.getUriForFile(context, "com.example.isdp2java.fileprovider", file)
+                val overlaidUri = withContext(Dispatchers.IO) {
+                    FileUtils.addOverlayToImage(context, uri, siteName, lat, lng, fullAddress)
+                }
+                overlaidUri?.let {
+                    sectionImages[key] = it
+                    viewerUri = it
+                    viewerFieldKey = key
+                    viewerFieldSection = section
+                    viewerFieldName = fieldName
+                    MediaScannerConnection.scanFile(context, arrayOf(file.absolutePath), null, null)
+                    Toast.makeText(context, "Map snapshot captured", Toast.LENGTH_SHORT).show()
+                }
+                bitmap.recycle()
             }
         }
     }
@@ -477,16 +493,14 @@ fun TSSRScreen(
                                 label = { Text("Site Name") },
                                 modifier = Modifier.weight(1f),
                                 singleLine = true,
-                                isError = triedToProceed && siteName.isBlank(),
+                                isError = triedToProceed && (siteName.isBlank() || (!isSiteNameConfirmed && customFolderName.isNullOrBlank())),
                                 trailingIcon = {
                                     if (isSiteNameConfirmed) {
                                         Icon(Icons.Default.CheckCircle, null, tint = ComposeColor(0xFF4CAF50))
-                                    } else {
+                                    } else if (siteName.isNotBlank()) {
                                         IconButton(onClick = {
-                                            if (siteName.isNotBlank()) {
-                                                isSiteNameConfirmed = true
-                                                Toast.makeText(context, "Site name confirmed", Toast.LENGTH_SHORT).show()
-                                            }
+                                            isSiteNameConfirmed = true
+                                            Toast.makeText(context, "Site name confirmed", Toast.LENGTH_SHORT).show()
                                         }) {
                                             Icon(Icons.Default.Check, null)
                                         }
@@ -521,7 +535,12 @@ fun TSSRScreen(
                                 label = { Text("Specify Telco") },
                                 modifier = Modifier.fillMaxWidth(),
                                 singleLine = true,
-                                isError = triedToProceed && customTelcoName.isBlank()
+                                isError = triedToProceed && customTelcoName.isBlank(),
+                                trailingIcon = {
+                                    if (customTelcoName.isNotBlank()) {
+                                        Icon(Icons.Default.CheckCircle, null, tint = ComposeColor(0xFF4CAF50))
+                                    }
+                                }
                             )
                         }
 
@@ -584,7 +603,7 @@ fun TSSRScreen(
                         onStartGallery = { key, fieldName ->
                             triedToProceed = true
                             if (!isHeaderValid) {
-                                Toast.makeText(context, "Please fill in all required properties and confirm Site Name", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, "Please fill in all required properties (Site Name, Coords, Telco) and confirm Site Name", Toast.LENGTH_SHORT).show()
                             } else {
                                 activeFieldKey = key
                                 activeFieldSection = section.title
@@ -601,7 +620,7 @@ fun TSSRScreen(
                         onScreenshot = {
                             triedToProceed = true
                             if (!isHeaderValid) {
-                                Toast.makeText(context, "Please fill in all required properties and confirm Site Name", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, "Please fill in all required properties (Site Name, Coords, Telco) and confirm Site Name", Toast.LENGTH_SHORT).show()
                             } else {
                                 captureMapSnapshot()
                             }
@@ -616,7 +635,7 @@ fun TSSRScreen(
                         onClick = {
                             triedToProceed = true
                             if (!isHeaderValid) {
-                                Toast.makeText(context, "Please fill in all required properties and confirm Site Name", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, "Please fill in all required properties (Site Name, Coords, Telco) and confirm Site Name", Toast.LENGTH_SHORT).show()
                             } else {
                                 showReportOptions = true
                             }
@@ -726,18 +745,27 @@ fun TSSRScreen(
                 uri = viewerUri!!,
                 onDismiss = { viewerUri = null },
                 onRetake = {
+                    val isMapAction = viewerFieldName == "Vicinity Map"
                     viewerUri = null
                     activeFieldKey = viewerFieldKey
                     activeFieldSection = viewerFieldSection
                     activeFieldName = viewerFieldName
-                    val hasCamera = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
-                    if (!hasCamera) cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
-                    else {
-                        FileUtils.createSurveyFile(context, "TSSR", siteName, activeFieldSection!!, activeFieldName!!, sessionTimestamp, customFolderName)?.let { file ->
-                            tempFilePath = file.absolutePath
-                            val uri = FileProvider.getUriForFile(context, "com.example.isdp2java.fileprovider", file)
-                            tempPhotoUriString = uri.toString()
-                            cameraLauncher.launch(uri)
+                    
+                    if (isMapAction) {
+                        // Clear the existing map image so the user can take a new one
+                        sectionImages.remove(activeFieldKey!!)
+                        viewerUri = null
+                        captureMapSnapshot(isResnap = true)
+                    } else {
+                        val hasCamera = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+                        if (!hasCamera) cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+                        else {
+                            FileUtils.createSurveyFile(context, "TSSR", siteName, activeFieldSection!!, activeFieldName!!, sessionTimestamp, customFolderName)?.let { file ->
+                                tempFilePath = file.absolutePath
+                                val uri = FileProvider.getUriForFile(context, "com.example.isdp2java.fileprovider", file)
+                                tempPhotoUriString = uri.toString()
+                                cameraLauncher.launch(uri)
+                            }
                         }
                     }
                 },
@@ -896,21 +924,6 @@ private fun generateDocx(
     }
 }
 
-private fun sectionDirToImages(context: Context, sectionDir: File): Map<String, Uri> {
-    val images = mutableMapOf<String, Uri>()
-    sectionDir.listFiles { f -> f.extension == "jpg" }?.forEach { file ->
-        val name = file.nameWithoutExtension
-        val parts = name.split("_")
-        if (parts.size >= 2) {
-            val fieldName = parts[1].replace("_", " ")
-            val sectionName = sectionDir.name.replace("_", " ")
-            val key = "${sectionName}_$fieldName"
-            images[key] = FileProvider.getUriForFile(context, "com.example.isdp2java.fileprovider", file)
-        }
-    }
-    return images
-}
-
 @Composable
 fun ImagePreviewDialog(uri: Uri, onDismiss: () -> Unit, onRetake: () -> Unit, onGallery: () -> Unit, isMap: Boolean = false) {
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
@@ -1013,6 +1026,25 @@ fun TSSRPhotoField(label: String, currentUri: Uri?, allowCamera: Boolean, onCame
 @Composable
 fun VicinityMapView(lat: String, lng: String, onMapReady: (MapView) -> Unit) {
     Box(modifier = Modifier.fillMaxWidth().height(200.dp).clip(RoundedCornerShape(8.dp))) {
-        AndroidView(factory = { ctx -> MapView(ctx).apply { setTileSource(TileSourceFactory.MAPNIK); setMultiTouchControls(true); controller.setZoom(18.0); val startPoint = GeoPoint(lat.toDoubleOrNull() ?: 14.59, lng.toDoubleOrNull() ?: 120.98); controller.setCenter(startPoint); val locationOverlay = MyLocationNewOverlay(GpsMyLocationProvider(ctx), this); locationOverlay.enableMyLocation(); overlays.add(locationOverlay); onMapReady(this) } }, update = { view -> val point = GeoPoint(lat.toDoubleOrNull() ?: 14.59, lng.toDoubleOrNull() ?: 120.98); view.controller.setCenter(point) })
+        AndroidView(
+            factory = { ctx ->
+                MapView(ctx).apply {
+                    setTileSource(TileSourceFactory.MAPNIK)
+                    setMultiTouchControls(true)
+                    zoomController.setVisibility(CustomZoomButtonsController.Visibility.NEVER) // Hide zoom buttons to prevent them appearing in snapshots
+                    
+                    // Set initial position only if it's the first time
+                    val startPoint = GeoPoint(lat.toDoubleOrNull() ?: 14.59, lng.toDoubleOrNull() ?: 120.98)
+                    controller.setZoom(18.0)
+                    controller.setCenter(startPoint)
+                    
+                    val locationOverlay = MyLocationNewOverlay(GpsMyLocationProvider(ctx), this)
+                    locationOverlay.enableMyLocation()
+                    overlays.add(locationOverlay)
+                    onMapReady(this)
+                }
+            },
+            update = { /* Do nothing in update to preserve user zoom/pan */ }
+        )
     }
 }

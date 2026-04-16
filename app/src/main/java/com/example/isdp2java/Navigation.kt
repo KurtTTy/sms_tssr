@@ -21,11 +21,20 @@ fun Navigation(onThemeToggle: () -> Unit) {
 
     NavHost(navController = navController, startDestination = "auth") {
         composable("auth") {
-            AuthScreen(onLogin = { navController.navigate("main") })
+            AuthScreen(onLogin = { 
+                navController.navigate("main") {
+                    popUpTo("auth") { inclusive = true }
+                }
+            })
         }
         composable("main") {
             MainScreen(
                 onThemeToggle = onThemeToggle,
+                onLogout = {
+                    navController.navigate("auth") {
+                        popUpTo("main") { inclusive = true }
+                    }
+                },
                 tssrFolder = sharedFolder,
                 wifiFolder = sharedFolder,
                 matsiFolder = sharedFolder,

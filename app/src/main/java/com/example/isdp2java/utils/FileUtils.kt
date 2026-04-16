@@ -112,7 +112,7 @@ object FileUtils {
         return folder
     }
 
-    fun createSurveyFile(context: Context, surveyType: String, siteName: String, section: String, fieldName: String, sessionTimestamp: String, customFolderName: String?): File? {
+    fun createSurveyFile(context: Context, surveyType: String, siteName: String, section: String, fieldName: String, sessionTimestamp: String, customFolderName: String?, suffix: String = ""): File? {
         try {
             val sanitizedSection = section.replace(Regex("[^a-zA-Z0-9_-]"), "_")
             val sanitizedFieldName = fieldName.replace(Regex("[^a-zA-Z0-9_-]"), "_")
@@ -135,7 +135,7 @@ object FileUtils {
                 else -> ""
             }
             
-            return File(subDir, "${prefix}${sanitizedSection}_${sanitizedFieldName}_${date}_$time.jpg").apply {
+            return File(subDir, "${prefix}${sanitizedSection}_${sanitizedFieldName}_${date}_$time${suffix}.jpg").apply {
                 if (!exists()) createNewFile()
             }
         } catch (e: Exception) {

@@ -21,6 +21,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.edit
 
+import androidx.compose.foundation.background
+import com.example.isdp2java.ui.theme.PrimaryGradient
+
 @Composable
 fun AuthScreen(onLogin: () -> Unit) {
     Box(
@@ -35,32 +38,15 @@ fun AuthScreen(onLogin: () -> Unit) {
             shape = RoundedCornerShape(16.dp),
             elevation = CardDefaults.cardElevation(8.dp)
         ) {
-            var selectedTab by remember { mutableStateOf(0) }
-            val tabs = listOf("Login", "Sign Up")
-
             Column(modifier = Modifier.padding(16.dp)) {
-                TabRow(
-                    selectedTabIndex = selectedTab,
-                    containerColor = Color.Transparent,
-                    contentColor = MaterialTheme.colorScheme.primary
-                ) {
-                    tabs.forEachIndexed { index, title ->
-                        Tab(
-                            selected = selectedTab == index,
-                            onClick = { selectedTab = index },
-                            text = { Text(title) },
-                            selectedContentColor = MaterialTheme.colorScheme.primary,
-                            unselectedContentColor = if (isSystemInDarkTheme()) Color.White else Color.Black
-                        )
-                    }
-                }
+                Text(
+                    text = "Login",
+                    style = MaterialTheme.typography.headlineMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(bottom = 16.dp)
+                )
 
-                Spacer(modifier = Modifier.height(16.dp))
-
-                when (selectedTab) {
-                    0 -> LoginTab(onLogin)
-                    1 -> SignUpTab()
-                }
+                LoginTab(onLogin)
             }
         }
     }
@@ -82,6 +68,7 @@ fun LoginTab(onLogin: () -> Unit) {
         rememberMe = savedRememberMe
         if (savedRememberMe) {
             username = sharedPreferences.getString("username", "") ?: ""
+            password = sharedPreferences.getString("password", "") ?: ""
         }
     }
 
@@ -141,13 +128,24 @@ fun LoginTab(onLogin: () -> Unit) {
         Spacer(modifier = Modifier.height(16.dp))
         Button(
             onClick = {
-                if (username == "adminkurt" && password == "kurt12345") {
+                val validUsers = mapOf(
+                    "SMSGT-WAERO-0" to "Waero@0",
+                    "SMSGT-WAERO-01" to "Waero@01",
+                    "SMSGT-WAERO-02" to "Waero@02",
+                    "SMSGT-WAERO-03" to "Waero@03",
+                    "SMSGT-WAERO-04" to "Waero@04",
+                    "SMSGT-WAERO-05" to "Waero@05"
+                )
+
+                if (validUsers[username] == password) {
                     sharedPreferences.edit {
                         if (rememberMe) {
                             putString("username", username)
+                            putString("password", password)
                             putBoolean("remember_me", true)
                         } else {
                             remove("username")
+                            remove("password")
                             putBoolean("remember_me", false)
                         }
                     }
@@ -156,10 +154,14 @@ fun LoginTab(onLogin: () -> Unit) {
                     hasError = true
                 }
             },
-            modifier = Modifier.fillMaxWidth().height(50.dp),
-            shape = RoundedCornerShape(8.dp)
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(50.dp)
+                .background(PrimaryGradient, shape = RoundedCornerShape(8.dp)),
+            shape = RoundedCornerShape(8.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent)
         ) {
-            Text("Login", fontSize = 18.sp)
+            Text("Login", fontSize = 18.sp, color = Color.White)
         }
 
         if (hasError) {
@@ -172,13 +174,3 @@ fun LoginTab(onLogin: () -> Unit) {
     }
 }
 
-@Composable
-fun SignUpTab() {
-    Column(
-        modifier = Modifier.fillMaxSize(),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
-    ) {
-        Text("Sign Up Screen")
-    }
-}
