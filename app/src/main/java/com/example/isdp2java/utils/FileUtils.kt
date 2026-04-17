@@ -3,6 +3,7 @@ package com.example.isdp2java.utils
 import android.content.Context
 import android.graphics.*
 import android.location.Geocoder
+import android.media.ExifInterface
 import android.net.Uri
 import android.os.Environment
 import android.util.Log
@@ -28,12 +29,35 @@ object FileUtils {
 
     fun addOverlayToImage(context: Context, uri: Uri, siteName: String, lat: String, lng: String, address: String): Uri? {
         return try {
-            val originalBitmap = context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it) } ?: return uri
-            val mutableBitmap = originalBitmap.copy(Bitmap.Config.ARGB_8888, true)
+            val inputStream = context.contentResolver.openInputStream(uri) ?: return uri
+            val exif = ExifInterface(inputStream)
+            val orientation = exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+            inputStream.close()
+
+            val options = BitmapFactory.Options().apply { inMutable = true }
+            var bitmap = context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, options) } ?: return uri
+
+            // Rotate bitmap based on EXIF orientation
+            val matrix = Matrix()
+            when (orientation) {
+                ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
+                ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
+                ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
+            }
+            
+            if (orientation != ExifInterface.ORIENTATION_NORMAL && orientation != ExifInterface.ORIENTATION_UNDEFINED) {
+                val rotatedBitmap = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+                if (rotatedBitmap != bitmap) {
+                    bitmap.recycle()
+                    bitmap = rotatedBitmap
+                }
+            }
+
+            val mutableBitmap = if (bitmap.isMutable) bitmap else bitmap.copy(Bitmap.Config.ARGB_8888, true)
             val canvas = Canvas(mutableBitmap)
             val paint = Paint().apply {
                 color = Color.WHITE
-                textSize = originalBitmap.height / 45f
+                textSize = mutableBitmap.height / 45f
                 typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
                 setShadowLayer(2f, 1f, 1f, Color.BLACK)
             }
@@ -56,7 +80,7 @@ object FileUtils {
                 mutableBitmap.compress(Bitmap.CompressFormat.JPEG, 90, out)
             }
             
-            if (originalBitmap != mutableBitmap) originalBitmap.recycle()
+            if (bitmap != mutableBitmap) bitmap.recycle()
             mutableBitmap.recycle()
             uri
         } catch (e: Exception) {
@@ -135,7 +159,8 @@ object FileUtils {
                 else -> ""
             }
             
-            return File(subDir, "${prefix}${sanitizedSection}_${sanitizedFieldName}_${date}_$time${suffix}.jpg").apply {
+            val fileName = "${prefix}${sanitizedSection}_${sanitizedFieldName}_${date}_$time$suffix.jpg"
+            return File(subDir, fileName).apply {
                 if (!exists()) createNewFile()
             }
         } catch (e: Exception) {
@@ -154,8 +179,6 @@ object FileUtils {
     }
 
     fun findImageRelativePath(siteFolder: File, uri: Uri): String? {
-        // Since we know our structure: SiteFolder / (TSSR|Wifi|Matsi) / Section / File
-        // We can search for the file by name in subdirectories
         val fileName = uri.lastPathSegment ?: return null
         
         fun searchRecursively(currentDir: File): String? {
