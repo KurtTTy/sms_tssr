@@ -1013,3 +1013,4 @@ private fun getAddressFromLocation(context: Context, latitude: Double, longitude
 private fun addOverlayToImage(context: Context, uri: Uri, siteName: String, lat: String, lng: String, address: String): Uri? {
     return FileUtils.addOverlayToImage(context, uri, siteName, lat, lng, address)
 }
+
