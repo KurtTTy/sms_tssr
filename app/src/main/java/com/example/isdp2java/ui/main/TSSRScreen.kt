@@ -355,7 +355,7 @@ fun TSSRScreen(
 
     var mapRef by remember { mutableStateOf<MapView?>(null) }
 
-    fun captureMapSnapshot(isResnap: Boolean = false) {
+    fun captureMapSnapshot() {
         val map = mapRef ?: return
         
         // Ensure the map is laid out and has dimensions
@@ -368,12 +368,9 @@ fun TSSRScreen(
         val section = "A3.1 Site Location"
         val fieldName = "Vicinity Map"
         
-        // Use a more unique name if resnapping to avoid cache/overlap issues
-        val resnapSuffix = if (isResnap) "_resnap_${System.currentTimeMillis()}" else ""
-        
         scope.launch {
             val destFile = withContext(Dispatchers.IO) {
-                FileUtils.createSurveyFile(context, "TSSR", siteName, section, fieldName, sessionTimestamp, customFolderName, suffix = resnapSuffix)
+                FileUtils.createSurveyFile(context, "TSSR", siteName, section, fieldName, sessionTimestamp, customFolderName)
             }
             destFile?.let { file ->
                 val bitmap = Bitmap.createBitmap(map.width, map.height, Bitmap.Config.ARGB_8888)
@@ -671,115 +668,115 @@ fun TSSRScreen(
                         OutlinedButton(onClick = { 
                             generateDocx(context, siteName, lat, lng, fullAddress, finalTelco, sections, sectionImages, customFolderName, sessionTimestamp)
                             showReportOptions = false 
-                        }, modifier = Modifier.fillMaxWidth()) {
-                            Icon(Icons.Default.Description, null)
-                            Spacer(Modifier.width(8.dp))
-                            Text("Save as DOCX")
-                        }
+                    }, modifier = Modifier.fillMaxWidth()) {
+                        Icon(Icons.Default.Description, null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Save as DOCX")
                     }
-                },
-                confirmButton = {},
-                dismissButton = { TextButton(onClick = { showReportOptions = false }) { Text("Cancel") } }
-            )
-        }
-
-        if (showCreateFolderDialog) {
-            var textValue by remember { mutableStateOf(customFolderName ?: "") }
-            AlertDialog(
-                onDismissRequest = { showCreateFolderDialog = false },
-                title = { Text("Set/Create Site Folder") },
-                text = {
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("This allows you to specify a custom directory name. Metadata will be shared within the folder.", style = MaterialTheme.typography.bodySmall)
-                        OutlinedTextField(
-                            value = textValue,
-                            onValueChange = { textValue = it },
-                            label = { Text("Folder Name") },
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                    }
-                },
-                confirmButton = {
-                    Button(onClick = {
-                        if (textValue.isNotBlank()) {
-                            customFolderName = textValue
-                            scope.launch { withContext(Dispatchers.IO) { FileUtils.getSurveyFolder(context, "TSSR", siteName, sessionTimestamp, textValue) } }
-                            showCreateFolderDialog = false
-                            Toast.makeText(context, "Folder set to: $textValue", Toast.LENGTH_SHORT).show()
-                        }
-                    }) { Text("Confirm") }
-                },
-                dismissButton = { TextButton(onClick = { showCreateFolderDialog = false }) { Text("Cancel") } }
-            )
-        }
-
-        if (showSelectFolderDialog) {
-            AlertDialog(
-                onDismissRequest = { showSelectFolderDialog = false },
-                title = { Text("Select Existing Site Folder") },
-                text = {
-                    LazyColumn(modifier = Modifier.heightIn(max = 400.dp)) {
-                        if (existingFolders.isEmpty()) {
-                            item { Text("No existing TSSR folders found.") }
-                        } else {
-                            items(existingFolders) { folder ->
-                                ListItem(
-                                    headlineContent = { Text(folder) },
-                                    modifier = Modifier.clickable {
-                                        customFolderName = folder
-                                        showSelectFolderDialog = false
-                                        Toast.makeText(context, "Folder selected: $folder", Toast.LENGTH_SHORT).show()
-                                    }
-                                )
-                            }
-                        }
-                    }
-                },
-                confirmButton = {},
-                dismissButton = { TextButton(onClick = { showSelectFolderDialog = false }) { Text("Cancel") } }
-            )
-        }
-
-        if (viewerUri != null) {
-            ImagePreviewDialog(
-                uri = viewerUri!!,
-                onDismiss = { viewerUri = null },
-                onRetake = {
-                    val isMapAction = viewerFieldName == "Vicinity Map"
-                    viewerUri = null
-                    activeFieldKey = viewerFieldKey
-                    activeFieldSection = viewerFieldSection
-                    activeFieldName = viewerFieldName
-                    
-                    if (isMapAction) {
-                        // Clear the existing map image so the user can take a new one
-                        sectionImages.remove(activeFieldKey!!)
-                        viewerUri = null
-                        captureMapSnapshot(isResnap = true)
-                    } else {
-                        val hasCamera = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
-                        if (!hasCamera) cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
-                        else {
-                            FileUtils.createSurveyFile(context, "TSSR", siteName, activeFieldSection!!, activeFieldName!!, sessionTimestamp, customFolderName)?.let { file ->
-                                tempFilePath = file.absolutePath
-                                val uri = FileProvider.getUriForFile(context, "com.example.isdp2java.fileprovider", file)
-                                tempPhotoUriString = uri.toString()
-                                cameraLauncher.launch(uri)
-                            }
-                        }
-                    }
-                },
-                onGallery = {
-                    viewerUri = null
-                    activeFieldKey = viewerFieldKey
-                    activeFieldSection = viewerFieldSection
-                    activeFieldName = viewerFieldName
-                    galleryLauncher.launch("image/*")
-                },
-                isMap = viewerFieldName == "Vicinity Map"
-            )
-        }
+                }
+            },
+            confirmButton = {},
+            dismissButton = { TextButton(onClick = { showReportOptions = false }) { Text("Cancel") } }
+        )
     }
+
+    if (showCreateFolderDialog) {
+        var textValue by remember { mutableStateOf(customFolderName ?: "") }
+        AlertDialog(
+            onDismissRequest = { showCreateFolderDialog = false },
+            title = { Text("Set/Create Site Folder") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("This allows you to specify a custom directory name. Metadata will be shared within the folder.", style = MaterialTheme.typography.bodySmall)
+                    OutlinedTextField(
+                        value = textValue,
+                        onValueChange = { textValue = it },
+                        label = { Text("Folder Name") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                Button(onClick = {
+                    if (textValue.isNotBlank()) {
+                        customFolderName = textValue
+                        scope.launch { withContext(Dispatchers.IO) { FileUtils.getSurveyFolder(context, "TSSR", siteName, sessionTimestamp, textValue) } }
+                        showCreateFolderDialog = false
+                        Toast.makeText(context, "Folder set to: $textValue", Toast.LENGTH_SHORT).show()
+                    }
+                }) { Text("Confirm") }
+            },
+            dismissButton = { TextButton(onClick = { showCreateFolderDialog = false }) { Text("Cancel") } }
+        )
+    }
+
+    if (showSelectFolderDialog) {
+        AlertDialog(
+            onDismissRequest = { showSelectFolderDialog = false },
+            title = { Text("Select Existing Site Folder") },
+            text = {
+                LazyColumn(modifier = Modifier.heightIn(max = 400.dp)) {
+                    if (existingFolders.isEmpty()) {
+                        item { Text("No existing TSSR folders found.") }
+                    } else {
+                        items(existingFolders) { folder ->
+                            ListItem(
+                                headlineContent = { Text(folder) },
+                                modifier = Modifier.clickable {
+                                    customFolderName = folder
+                                    showSelectFolderDialog = false
+                                    Toast.makeText(context, "Folder selected: $folder", Toast.LENGTH_SHORT).show()
+                                }
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = { TextButton(onClick = { showSelectFolderDialog = false }) { Text("Cancel") } }
+        )
+    }
+
+    if (viewerUri != null) {
+        ImagePreviewDialog(
+            uri = viewerUri!!,
+            onDismiss = { viewerUri = null },
+            onRetake = {
+                val isMapAction = viewerFieldName == "Vicinity Map"
+                viewerUri = null
+                activeFieldKey = viewerFieldKey
+                activeFieldSection = viewerFieldSection
+                activeFieldName = viewerFieldName
+                
+                if (isMapAction) {
+                    // Clear the existing map image so the user can take a new one
+                    sectionImages.remove(activeFieldKey!!)
+                    viewerUri = null
+                    captureMapSnapshot()
+                } else {
+                    val hasCamera = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+                    if (!hasCamera) cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+                    else {
+                        FileUtils.createSurveyFile(context, "TSSR", siteName, activeFieldSection!!, activeFieldName!!, sessionTimestamp, customFolderName)?.let { file ->
+                            tempFilePath = file.absolutePath
+                            val uri = FileProvider.getUriForFile(context, "com.example.isdp2java.fileprovider", file)
+                            tempPhotoUriString = uri.toString()
+                            cameraLauncher.launch(uri)
+                        }
+                    }
+                }
+            },
+            onGallery = {
+                viewerUri = null
+                activeFieldKey = viewerFieldKey
+                activeFieldSection = viewerFieldSection
+                activeFieldName = viewerFieldName
+                galleryLauncher.launch("image/*")
+            },
+            isMap = viewerFieldName == "Vicinity Map"
+        )
+    }
+}
 }
 
 private fun generatePDF(
