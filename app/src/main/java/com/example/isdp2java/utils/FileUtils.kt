@@ -2,21 +2,30 @@ package com.example.isdp2java.utils
 
 import android.content.Context
 import android.graphics.*
+import android.location.Address
 import android.location.Geocoder
 import android.net.Uri
+import android.os.Build
 import android.os.Environment
 import android.util.Log
+import androidx.exifinterface.media.ExifInterface
 import java.io.File
-import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.*
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
 
 object FileUtils {
 
-    fun getAddressFromLocation(context: Context, latitude: Double, longitude: Double): String {
+    suspend fun getAddressFromLocation(context: Context, latitude: Double, longitude: Double): String {
         return try {
             val geocoder = Geocoder(context, Locale.getDefault())
-            val addresses = geocoder.getFromLocation(latitude, longitude, 1)
+            val addresses = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                geocoder.awaitFromLocation(latitude, longitude, 1)
+            } else {
+                @Suppress("DEPRECATION")
+                geocoder.getFromLocation(latitude, longitude, 1)
+            }
             if (!addresses.isNullOrEmpty()) {
                 val addr = addresses[0]
                 "${addr.locality ?: ""}, ${addr.adminArea ?: ""}, ${addr.countryName ?: ""}\n${addr.getAddressLine(0) ?: ""}"
@@ -26,9 +35,44 @@ object FileUtils {
         }
     }
 
+    private suspend fun Geocoder.awaitFromLocation(
+        latitude: Double,
+        longitude: Double,
+        maxResults: Int
+    ): List<Address>? = suspendCancellableCoroutine { continuation ->
+        getFromLocation(latitude, longitude, maxResults, object : Geocoder.GeocodeListener {
+            override fun onGeocode(addresses: MutableList<Address>) {
+                if (continuation.isActive) continuation.resume(addresses)
+            }
+
+            override fun onError(errorMessage: String?) {
+                if (continuation.isActive) continuation.resume(null)
+            }
+        })
+    }
+
     fun addOverlayToImage(context: Context, uri: Uri, siteName: String, lat: String, lng: String, address: String): Uri? {
         return try {
-            val originalBitmap = context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it) } ?: return uri
+            val inputStream = context.contentResolver.openInputStream(uri) ?: return uri
+            val exif = ExifInterface(inputStream)
+            val orientation = exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_UNDEFINED)
+            inputStream.close()
+
+            var originalBitmap = context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it) } ?: return uri
+            
+            // Fix orientation
+            val matrix = Matrix()
+            when (orientation) {
+                ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
+                ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
+                ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
+            }
+            if (orientation != ExifInterface.ORIENTATION_UNDEFINED && orientation != ExifInterface.ORIENTATION_NORMAL) {
+                val rotated = Bitmap.createBitmap(originalBitmap, 0, 0, originalBitmap.width, originalBitmap.height, matrix, true)
+                if (rotated != originalBitmap) originalBitmap.recycle()
+                originalBitmap = rotated
+            }
+
             val mutableBitmap = originalBitmap.copy(Bitmap.Config.ARGB_8888, true)
             val canvas = Canvas(mutableBitmap)
             val paint = Paint().apply {
@@ -83,7 +127,7 @@ object FileUtils {
             Log.e("FileUtils", "Failed to create directory: ${dir.absolutePath}")
             return null
         }
-        
+
         // Ensure metadata exists for newly created folders
         if (!File(dir, "metadata.properties").exists()) {
             val props = Properties()

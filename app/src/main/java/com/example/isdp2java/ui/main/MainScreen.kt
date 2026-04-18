@@ -1,12 +1,14 @@
 package com.example.isdp2java.ui.main
 
+import android.content.Context
+import android.net.Uri
 import android.os.Environment
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Logout
@@ -16,15 +18,21 @@ import androidx.compose.runtime.*
 import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import coil.compose.AsyncImage
 import com.example.isdp2java.R
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import com.example.isdp2java.utils.FileUtils
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -40,20 +48,71 @@ fun MainScreen(
     onNavigateToTSSR: (String?, String?) -> Unit = { _, _ -> }
 ) {
     val context = LocalContext.current
+    val prefs = remember { context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE) }
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
 
     var showFolderSelect by remember { mutableStateOf(false) }
     var existingFolders by remember { mutableStateOf<List<String>>(emptyList()) }
+    var recentSurveys by remember { mutableStateOf<List<History>>(emptyList()) }
+    var recentClearedBefore by remember { mutableStateOf(prefs.getLong("recent_clear_before", 0L)) }
 
     fun refreshFolders() {
         scope.launch(Dispatchers.IO) {
             val rootDir = Environment.getExternalStorageDirectory()
             val baseDir = File(rootDir, "SMS_ISDP_Surveys")
             if (!baseDir.exists()) baseDir.mkdirs()
-            val folders = baseDir.listFiles { file -> file.isDirectory && File(file, "metadata.properties").exists() }?.map { it.name } ?: emptyList()
+            val folders = baseDir.listFiles { file -> file.isDirectory && File(file, "metadata.properties").exists() }
+                ?.toList()
+                ?: emptyList()
+
+            val surveys = folders.mapNotNull { folder ->
+                val metadataFile = File(folder, "metadata.properties")
+                val props = FileUtils.loadMetadata(folder)
+                if (props != null) {
+                    val siteName = props.getProperty("siteName", folder.name)
+                    val telco = props.getProperty("telcoName", "Unknown")
+                    val type = props.getProperty("surveyType", "TSSR")
+                    val address = props.getProperty("siteAddress") ?: props.getProperty("fullAddress", "")
+                    val lastUpdated = maxOf(folder.lastModified(), metadataFile.lastModified())
+
+                    var thumbnailPath = props.getProperty("mapSnapshotPath")
+                    if (thumbnailPath == null) {
+                        // Fallback logic: check for common map/gps keys
+                        thumbnailPath = props.getProperty("img_A3.1 Site Location_Vicinity Map")
+                            ?: props.getProperty("img_Site Location_Vicinity Map")
+                                    ?: props.getProperty("img_Section 1_GPS Reading")
+                                    ?: props.getProperty("mainImagePath")
+                    }
+
+                    val thumbnailUri = if (thumbnailPath != null) {
+                        val imgFile = File(folder, thumbnailPath)
+                        if (imgFile.exists()) Uri.fromFile(imgFile) else null
+                    } else null
+
+                    val date = SimpleDateFormat("MMM dd, yyyy", Locale.getDefault()).format(Date(lastUpdated))
+                    History(
+                        title = siteName,
+                        date = date,
+                        folderName = folder.name,
+                        telco = telco,
+                        surveyType = type,
+                        address = address,
+                        thumbnailUri = thumbnailUri
+                    )
+                        .let { history -> lastUpdated to history }
+                } else null
+            }
+                .filter { it.first > recentClearedBefore }
+                .sortedByDescending { it.first }
+                .take(5)
+                .map { it.second }
+
             withContext(Dispatchers.Main) {
                 existingFolders = folders
+                    .sortedByDescending { maxOf(it.lastModified(), File(it, "metadata.properties").lastModified()) }
+                    .map { it.name }
+                recentSurveys = surveys
             }
         }
     }
@@ -67,6 +126,10 @@ fun MainScreen(
             Brand("Matsi", icon = Icons.Default.Business),
             Brand("Wifi", icon = Icons.Default.Wifi),
         )
+    }
+
+    LaunchedEffect(recentClearedBefore, tssrFolder, wifiFolder, matsiFolder) {
+        refreshFolders()
     }
 
     ModalNavigationDrawer(
@@ -119,7 +182,7 @@ fun MainScreen(
                 )
 
                 HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-                
+
                 NavigationDrawerItem(
                     label = { Column {
                         Text("Selected Project Folder")
@@ -134,7 +197,7 @@ fun MainScreen(
                     },
                     icon = { Icon(Icons.Default.Folder, null) }
                 )
-                
+
                 if (tssrFolder != null) {
                     NavigationDrawerItem(
                         label = { Text("Clear Folder Selection") },
@@ -193,8 +256,8 @@ fun MainScreen(
                                 BrandBox(
                                     modifier = Modifier.weight(1f),
                                     brand = brand,
-                                    onClick = { 
-                                        onNavigateToTSSR(tssrFolder, brand.name) 
+                                    onClick = {
+                                        onNavigateToTSSR(null, brand.name)
                                     })
                             }
                         }
@@ -204,8 +267,8 @@ fun MainScreen(
                                 BrandBox(
                                     modifier = Modifier.weight(1f),
                                     brand = brand,
-                                    onClick = { 
-                                        onNavigateToTSSR(tssrFolder, brand.name) 
+                                    onClick = {
+                                        onNavigateToTSSR(null, brand.name)
                                     })
                             }
                             repeat(3 - brands.drop(3).take(3).size) {
@@ -214,25 +277,90 @@ fun MainScreen(
                         }
                     }
                 }
-                
-                if (tssrFolder != null) {
-                    item {
-                        Card(
-                            modifier = Modifier.fillMaxWidth().padding(16.dp),
-                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(16.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Icon(Icons.Default.Folder, null)
-                                Spacer(Modifier.width(8.dp))
-                                Column {
-                                    Text("Active Project:", style = MaterialTheme.typography.labelSmall)
-                                    Text(tssrFolder, style = MaterialTheme.typography.bodyMedium)
-                                }
+
+                item {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp, 16.dp, 16.dp, 8.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "Recent Surveys",
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                        if (recentSurveys.isNotEmpty()) {
+                            TextButton(onClick = {
+                                val clearedAt = System.currentTimeMillis()
+                                prefs.edit().putLong("recent_clear_before", clearedAt).apply()
+                                recentClearedBefore = clearedAt
+                                recentSurveys = emptyList()
+                            }) {
+                                Text("Clear Recent")
                             }
                         }
+                    }
+                }
+
+                if (recentSurveys.isEmpty()) {
+                    item {
+                        Text(
+                            "No recent surveys found.",
+                            modifier = Modifier.padding(16.dp),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                } else {
+                    items(recentSurveys) { survey ->
+                        ListItem(
+                            headlineContent = { Text(survey.title) },
+                            supportingContent = {
+                                Column {
+                                    Text("${survey.telco} • ${survey.date}")
+                                    if (survey.address.isNotEmpty()) {
+                                        Text(
+                                            survey.address,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                }
+                            },
+                            leadingContent = {
+                                if (survey.thumbnailUri != null) {
+                                    AsyncImage(
+                                        model = survey.thumbnailUri,
+                                        contentDescription = null,
+                                        modifier = Modifier
+                                            .size(56.dp)
+                                            .clip(RoundedCornerShape(8.dp)),
+                                        contentScale = ContentScale.Crop
+                                    )
+                                } else {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(56.dp)
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(MaterialTheme.colorScheme.surfaceVariant),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(Icons.Default.History, null)
+                                    }
+                                }
+                            },
+                            trailingContent = {
+                                Icon(Icons.Default.ChevronRight, null)
+                            },
+                            modifier = Modifier.clickable {
+                                onTssrFolderChange(survey.folderName)
+                                onWifiFolderChange(survey.folderName)
+                                onMatsiFolderChange(survey.folderName)
+                                onNavigateToTSSR(survey.folderName, survey.surveyType)
+                            }
+                        )
                     }
                 }
             }
@@ -242,11 +370,11 @@ fun MainScreen(
             FolderSelectionDialog(
                 title = "Select Project Folder",
                 folders = existingFolders,
-                onFolderSelected = { 
+                onFolderSelected = {
                     onTssrFolderChange(it)
                     onWifiFolderChange(it)
                     onMatsiFolderChange(it)
-                    showFolderSelect = false 
+                    showFolderSelect = false
                 },
                 onFolderCreated = { folderName ->
                     scope.launch(Dispatchers.IO) {
@@ -306,7 +434,7 @@ fun FolderSelectionDialog(
                         }
                     )
                 }
-                
+
                 if (folders.isEmpty()) {
                     Text("No folders found with metadata.properties in SMS_ISDP_Surveys")
                 } else {
@@ -333,8 +461,11 @@ fun FolderSelectionDialog(
 fun BrandBox(modifier: Modifier = Modifier, brand: Brand, onClick: () -> Unit = {}) {
     Surface(modifier = modifier.aspectRatio(1f), shape = RoundedCornerShape(16.dp), tonalElevation = 2.dp, shadowElevation = 4.dp, onClick = onClick) {
         Column(modifier = Modifier.padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-            if (brand.image != null) Image(painter = painterResource(id = brand.image!!), contentDescription = brand.name, modifier = Modifier.size(32.dp))
-            else if (brand.icon != null) Icon(brand.icon!!, contentDescription = brand.name, modifier = Modifier.size(32.dp))
+            brand.image?.let { imageRes ->
+                Image(painter = painterResource(id = imageRes), contentDescription = brand.name, modifier = Modifier.size(32.dp))
+            } ?: brand.icon?.let { icon ->
+                Icon(icon, contentDescription = brand.name, modifier = Modifier.size(32.dp))
+            }
             Spacer(Modifier.height(8.dp))
             Text(text = brand.name, style = MaterialTheme.typography.bodyMedium)
         }

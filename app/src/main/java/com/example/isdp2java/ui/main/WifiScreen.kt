@@ -4,7 +4,6 @@ import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.*
-import android.location.Geocoder
 import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
@@ -101,14 +100,8 @@ fun WifiScreen(
     var viewerFieldName by remember { mutableStateOf<String?>(null) }
 
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
-    var customFolderName by remember { mutableStateOf(initialFolder) }
-
-    // Sync back to MainActivity when local folder state changes
-    LaunchedEffect(initialFolder) {
-        if (initialFolder != customFolderName) {
-            customFolderName = initialFolder
-        }
-    }
+    var customFolderName by remember { mutableStateOf<String?>(null) }
+    var isRestoringProject by remember { mutableStateOf(true) }
     
     LaunchedEffect(customFolderName) {
         onFolderChange(customFolderName)
@@ -131,7 +124,7 @@ fun WifiScreen(
     val locationCallback = remember {
         object : LocationCallback() {
             override fun onLocationResult(result: LocationResult) {
-                if (initialFolder != null) return
+                if (initialFolder != null || isRestoringProject) return
                 result.lastLocation?.let { location ->
                     if (lat.isEmpty() || lng.isEmpty()) {
                         lat = location.latitude.toString()
@@ -153,26 +146,29 @@ fun WifiScreen(
     var tempPhotoUriString by rememberSaveable { mutableStateOf<String?>(null) }
 
     val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
-        if (success && tempPhotoUriString != null && activeFieldKey != null) {
-            val originalUri = Uri.parse(tempPhotoUriString)
-            scope.launch {
-                val overlaidUri = withContext(Dispatchers.IO) {
+        if (!success) return@rememberLauncherForActivityResult
+
+        val photoUriString = tempPhotoUriString ?: return@rememberLauncherForActivityResult
+        val fieldKey = activeFieldKey ?: return@rememberLauncherForActivityResult
+        val originalUri = Uri.parse(photoUriString)
+
+        scope.launch {
+            val overlaidUri = withContext(Dispatchers.IO) {
                 FileUtils.addOverlayToImage(context, originalUri, siteName, lat, lng, fullAddress)
             }
-                overlaidUri?.let {
-                    sectionImages[activeFieldKey!!] = it
-                    viewerUri = it
-                    viewerFieldKey = activeFieldKey
-                    viewerFieldSection = activeFieldSection
-                    viewerFieldName = activeFieldName
-                }
+            overlaidUri?.let {
+                sectionImages[fieldKey] = it
+                viewerUri = it
+                viewerFieldKey = fieldKey
+                viewerFieldSection = activeFieldSection
+                viewerFieldName = activeFieldName
             }
         }
     }
 
     val cameraPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted ->
         if (isGranted) {
-            activeFieldKey?.let { key ->
+            if (activeFieldKey != null) {
                 activeFieldSection?.let { section ->
                     activeFieldName?.let { field ->
                         FileUtils.createSurveyFile(context, "Wifi", siteName, section, field, sessionTimestamp, customFolderName)?.let { file ->
@@ -197,52 +193,90 @@ fun WifiScreen(
         }
     }
 
-    LaunchedEffect(initialFolder) {
-        if (initialFolder != null) {
-            val wifiDir = FileUtils.getSurveyFolder(context, "Wifi", "", "", initialFolder)
-            if (wifiDir != null && wifiDir.exists()) {
-                withContext(Dispatchers.IO) {
-                    val metadataFile = File(wifiDir, "metadata.properties")
-                    if (metadataFile.exists()) {
-                        val props = FileUtils.loadMetadata(wifiDir)
-                        if (props != null) {
-                            withContext(Dispatchers.Main) {
-                                siteName = props.getProperty("siteName", "")
-                                if (siteName.isNotBlank()) isSiteNameConfirmed = true
-                                lat = props.getProperty("lat", "")
-                                lng = props.getProperty("lng", "")
-                                fullAddress = props.getProperty("fullAddress", "")
-                                if (initialTelco == null) {
-                                    telcoName = props.getProperty("telcoName", telcoName)
-                                }
-                                
-                                apLocationCount = props.getProperty("apLocationCount", "5").toIntOrNull() ?: 5
-                                apCoverageCount = props.getProperty("apCoverageCount", "5").toIntOrNull() ?: 5
-                                idfCount = props.getProperty("idfCount", "5").toIntOrNull() ?: 5
-                                powerTappingCount = props.getProperty("powerTappingCount", "5").toIntOrNull() ?: 5
+    LaunchedEffect(initialFolder, initialTelco) {
+        isRestoringProject = true
+        customFolderName = initialFolder
+        siteName = ""
+        isSiteNameConfirmed = false
+        lat = ""
+        lng = ""
+        fullAddress = "Detecting location..."
+        telcoName = initialTelco ?: "Wifi"
+        customTelcoName = ""
+        apLocationCount = 5
+        apCoverageCount = 5
+        idfCount = 5
+        powerTappingCount = 5
+        sectionImages.clear()
+        viewerUri = null
+        viewerFieldKey = null
+        viewerFieldSection = null
+        viewerFieldName = null
+        activeFieldKey = null
+        activeFieldSection = null
+        activeFieldName = null
+        tempPhotoUriString = null
+        showReportOptions = false
+        triedToProceed = false
 
-                                props.stringPropertyNames().filter { it.startsWith("img_") }.forEach { propKey ->
-                                    val key = propKey.substring(4)
-                                    val relPath = props.getProperty(propKey)
-                                    val imgFile = File(wifiDir, relPath)
-                                    if (imgFile.exists()) {
-                                        sectionImages[key] = FileProvider.getUriForFile(context, "com.example.isdp2java.fileprovider", imgFile)
+        try {
+            if (initialFolder != null) {
+                val wifiDir = FileUtils.getSurveyFolder(context, "Wifi", "", "", initialFolder)
+                if (wifiDir != null && wifiDir.exists()) {
+                    withContext(Dispatchers.IO) {
+                        val metadataFile = File(wifiDir, "metadata.properties")
+                        if (metadataFile.exists()) {
+                            val props = FileUtils.loadMetadata(wifiDir)
+                            if (props != null) {
+                                withContext(Dispatchers.Main) {
+                                    siteName = props.getProperty("siteName", "")
+                                    if (siteName.isNotBlank()) isSiteNameConfirmed = true
+                                    lat = props.getProperty("lat", "")
+                                    lng = props.getProperty("lng", "")
+                                    fullAddress = props.getProperty("fullAddress", props.getProperty("siteAddress", ""))
+                                    telcoName = props.getProperty("telcoName", telcoName)
+                                    customTelcoName = props.getProperty("customTelcoName", "")
+
+                                    apLocationCount = props.getProperty("apLocationCount", "5").toIntOrNull() ?: 5
+                                    apCoverageCount = props.getProperty("apCoverageCount", "5").toIntOrNull() ?: 5
+                                    idfCount = props.getProperty("idfCount", "5").toIntOrNull() ?: 5
+                                    powerTappingCount = props.getProperty("powerTappingCount", "5").toIntOrNull() ?: 5
+
+                                    props.stringPropertyNames().filter { it.startsWith("img_") }.forEach { propKey ->
+                                        val key = propKey.substring(4)
+                                        val relPath = props.getProperty(propKey)
+                                        if (relPath != null) {
+                                            val imgFile = File(wifiDir, relPath)
+                                            if (imgFile.exists()) {
+                                                sectionImages[key] = FileProvider.getUriForFile(context, "com.example.isdp2java.fileprovider", imgFile)
+                                            }
+                                        }
+                                    }
+                                    val mapPath = props.getProperty("mapSnapshotPath")
+                                    if (mapPath != null) {
+                                        val mapFile = File(wifiDir, mapPath)
+                                        if (mapFile.exists()) {
+                                            sectionImages["Site Location_Vicinity Map"] = FileProvider.getUriForFile(context, "com.example.isdp2java.fileprovider", mapFile)
+                                        }
                                     }
                                 }
                             }
-                        }
-                    } else {
-                        withContext(Dispatchers.Main) {
-                            siteName = initialFolder
-                            if (siteName.isNotBlank()) isSiteNameConfirmed = true
+                        } else {
+                            withContext(Dispatchers.Main) {
+                                siteName = initialFolder
+                                if (siteName.isNotBlank()) isSiteNameConfirmed = true
+                            }
                         }
                     }
                 }
             }
+        } finally {
+            isRestoringProject = false
         }
     }
 
     LaunchedEffect(isSiteNameConfirmed, customFolderName, lat, lng, fullAddress, telcoName, customTelcoName, sectionImages.size, apLocationCount, apCoverageCount, idfCount, powerTappingCount) {
+        if (isRestoringProject) return@LaunchedEffect
         if (customFolderName != null || (isSiteNameConfirmed && siteName.isNotBlank())) {
             val folder = FileUtils.getSurveyFolder(context, "Wifi", siteName, sessionTimestamp, customFolderName)
             if (folder != null) {
@@ -254,8 +288,10 @@ fun WifiScreen(
                         props.setProperty("lat", lat)
                         props.setProperty("lng", lng)
                         props.setProperty("fullAddress", fullAddress)
-                        val finalTelco = if (telcoName == "Neutral" && customTelcoName.isNotBlank()) customTelcoName else telcoName
-                        props.setProperty("telcoName", finalTelco)
+                        props.setProperty("siteAddress", fullAddress) // Added for history consistency
+                        props.setProperty("telcoName", telcoName)
+                        props.setProperty("customTelcoName", customTelcoName)
+                        props.setProperty("surveyType", "Wifi")
                         props.setProperty("apLocationCount", apLocationCount.toString())
                         props.setProperty("apCoverageCount", apCoverageCount.toString())
                         props.setProperty("idfCount", idfCount.toString())
@@ -266,6 +302,9 @@ fun WifiScreen(
                                 val relPath = FileUtils.findImageRelativePath(folder, u)
                                 if (relPath != null) {
                                     props.setProperty("img_$key", relPath)
+                                    if (key == "Site Location_Vicinity Map") {
+                                        props.setProperty("mapSnapshotPath", relPath)
+                                    }
                                 }
                             }
                         }
@@ -285,7 +324,7 @@ fun WifiScreen(
         } else {
             try {
                 fusedLocationClient.lastLocation.addOnSuccessListener { location ->
-                    if (initialFolder == null && location != null) {
+                    if (!isRestoringProject && initialFolder == null && location != null) {
                         if (lat.isEmpty()) lat = location.latitude.toString()
                         if (lng.isEmpty()) lng = location.longitude.toString()
                         scope.launch {
@@ -664,7 +703,7 @@ fun WifiScreen(
                     Text("Telco: $finalTelco")
                     Button(onClick = { 
                         generateWifiPDF(context, siteName, lat, lng, fullAddress, finalTelco, sections, sectionImages, customFolderName, sessionTimestamp)
-                        showReportOptions = false 
+                        showReportOptions = false
                     }, modifier = Modifier.fillMaxWidth()) {
                         Icon(Icons.Default.PictureAsPdf, null)
                         Spacer(Modifier.width(8.dp))
@@ -672,7 +711,7 @@ fun WifiScreen(
                     }
                     OutlinedButton(onClick = { 
                         generateWifiDocx(context, siteName, lat, lng, fullAddress, finalTelco, sections, sectionImages, customFolderName, sessionTimestamp)
-                        showReportOptions = false 
+                        showReportOptions = false
                     }, modifier = Modifier.fillMaxWidth()) {
                         Icon(Icons.Default.Description, null)
                         Spacer(Modifier.width(8.dp))
@@ -750,9 +789,9 @@ fun WifiScreen(
         )
     }
 
-    if (viewerUri != null) {
+    viewerUri?.let { currentViewerUri ->
         WifiImagePreviewDialog(
-            uri = viewerUri!!,
+            uri = currentViewerUri,
             onDismiss = { viewerUri = null },
             onRetake = {
                 val key = viewerFieldKey ?: ""
@@ -842,7 +881,7 @@ fun CollapsibleWifiSection(
                                                     if (images[key] == null) {
                                                         if (isVicinityMap) onScreenshot() else onStartCamera(key, field)
                                                     } else {
-                                                        onImageClick(key, images[key]!!, field)
+                                                        images[key]?.let { uri -> onImageClick(key, uri, field) }
                                                     }
                                                 },
                                                 onGalleryClick = { onStartGallery(key, field) },
@@ -962,14 +1001,6 @@ fun WifiVicinityMapView(lat: String, lng: String, onMapReady: (MapView) -> Unit)
             update = { /* Do nothing in update to preserve user zoom/pan */ }
         )
     }
-}
-
-private fun getAddressFromLocation(context: Context, latitude: Double, longitude: Double): String {
-    return FileUtils.getAddressFromLocation(context, latitude, longitude)
-}
-
-private fun addOverlayToImage(context: Context, uri: Uri, siteName: String, lat: String, lng: String, address: String): Uri? {
-    return FileUtils.addOverlayToImage(context, uri, siteName, lat, lng, address)
 }
 
 private fun generateWifiPDF(context: Context, siteName: String, lat: String, lng: String, address: String, telco: String, sections: List<TSSRSectionData>, images: Map<String, Uri?>, customFolderName: String?, sessionTime: String) {

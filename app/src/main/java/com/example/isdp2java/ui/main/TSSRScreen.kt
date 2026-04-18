@@ -4,7 +4,6 @@ import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.*
-import android.location.Geocoder
 import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
@@ -19,7 +18,6 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -99,14 +97,8 @@ fun TSSRScreen(
     var viewerFieldName by remember { mutableStateOf<String?>(null) }
 
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
-    var customFolderName by remember { mutableStateOf(initialFolder) }
-
-    // Sync back to MainActivity when local folder state changes
-    LaunchedEffect(initialFolder) {
-        if (initialFolder != customFolderName) {
-            customFolderName = initialFolder
-        }
-    }
+    var customFolderName by remember { mutableStateOf<String?>(null) }
+    var isRestoringProject by remember { mutableStateOf(true) }
 
     LaunchedEffect(customFolderName) {
         onFolderChange(customFolderName)
@@ -129,7 +121,7 @@ fun TSSRScreen(
     val locationCallback = remember {
         object : LocationCallback() {
             override fun onLocationResult(result: LocationResult) {
-                if (initialFolder != null) return
+                if (initialFolder != null || isRestoringProject) return
                 result.lastLocation?.let { location ->
                     if (lat.isEmpty() || lng.isEmpty()) {
                         lat = location.latitude.toString()
@@ -152,38 +144,42 @@ fun TSSRScreen(
     var tempFilePath by rememberSaveable { mutableStateOf<String?>(null) }
 
     val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
-        if (success && tempPhotoUriString != null && activeFieldKey != null) {
-            val originalUri = Uri.parse(tempPhotoUriString!!)
-            scope.launch {
-                val overlaidUri = withContext(Dispatchers.IO) {
-                    FileUtils.addOverlayToImage(context, originalUri, siteName, lat, lng, fullAddress)
-                }
-                overlaidUri?.let { uri ->
-                    sectionImages[activeFieldKey!!] = uri
-                    viewerUri = uri
-                    viewerFieldKey = activeFieldKey
-                    viewerFieldSection = activeFieldSection
-                    viewerFieldName = activeFieldName
-                    
-                    // Force media scan so it shows in device gallery
-                    tempFilePath?.let { path ->
-                        MediaScannerConnection.scanFile(context, arrayOf(path), null, null)
-                    }
+        if (!success) return@rememberLauncherForActivityResult
+
+        val photoUriString = tempPhotoUriString ?: return@rememberLauncherForActivityResult
+        val fieldKey = activeFieldKey ?: return@rememberLauncherForActivityResult
+        val originalUri = Uri.parse(photoUriString)
+
+        scope.launch {
+            val overlaidUri = withContext(Dispatchers.IO) {
+                FileUtils.addOverlayToImage(context, originalUri, siteName, lat, lng, fullAddress)
+            }
+            overlaidUri?.let { uri ->
+                sectionImages[fieldKey] = uri
+                viewerUri = uri
+                viewerFieldKey = fieldKey
+                viewerFieldSection = activeFieldSection
+                viewerFieldName = activeFieldName
+
+                // Force media scan so it shows in device gallery
+                tempFilePath?.let { path ->
+                    MediaScannerConnection.scanFile(context, arrayOf(path), null, null)
                 }
             }
         }
     }
 
     val galleryLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { selectedUri ->
+        val fieldKey = activeFieldKey ?: return@rememberLauncherForActivityResult
         selectedUri?.let { sourceUri ->
             scope.launch {
                 val overlaidUri = withContext(Dispatchers.IO) {
                     FileUtils.addOverlayToImage(context, sourceUri, siteName, lat, lng, fullAddress)
                 }
                 overlaidUri?.let { uri ->
-                    sectionImages[activeFieldKey!!] = uri
+                    sectionImages[fieldKey] = uri
                     viewerUri = uri
-                    viewerFieldKey = activeFieldKey
+                    viewerFieldKey = fieldKey
                     viewerFieldSection = activeFieldSection
                     viewerFieldName = activeFieldName
                 }
@@ -193,7 +189,7 @@ fun TSSRScreen(
 
     val cameraPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted ->
         if (isGranted) {
-            activeFieldKey?.let { key ->
+            if (activeFieldKey != null) {
                 activeFieldSection?.let { section ->
                     activeFieldName?.let { field ->
                         FileUtils.createSurveyFile(context, "TSSR", siteName, section, field, sessionTimestamp, customFolderName)?.let { file ->
@@ -230,7 +226,7 @@ fun TSSRScreen(
         } else {
             try {
                 fusedLocationClient.lastLocation.addOnSuccessListener { location ->
-                    if (initialFolder == null && location != null) {
+                    if (!isRestoringProject && initialFolder == null && location != null) {
                         if (lat.isEmpty()) lat = location.latitude.toString()
                         if (lng.isEmpty()) lng = location.longitude.toString()
                         scope.launch {
@@ -257,50 +253,87 @@ fun TSSRScreen(
         onDispose { fusedLocationClient.removeLocationUpdates(locationCallback) }
     }
 
-    LaunchedEffect(initialFolder) {
-        if (initialFolder != null) {
-            val tssrDir = FileUtils.getSurveyFolder(context, "TSSR", "", "", initialFolder)
-            if (tssrDir != null && tssrDir.exists()) {
-                withContext(Dispatchers.IO) {
-                    try {
-                        val props = FileUtils.loadMetadata(tssrDir)
-                        if (props != null) {
-                            withContext(Dispatchers.Main) {
-                                siteName = props.getProperty("siteName", "")
-                                if (siteName.isNotBlank()) isSiteNameConfirmed = true
-                                lat = props.getProperty("lat", "")
-                                lng = props.getProperty("lng", "")
-                                fullAddress = props.getProperty("fullAddress", "")
-                                vehicleAccess = props.getProperty("vehicleAccess", "4 Wheeled")
-                                otherVehicleAccess = props.getProperty("otherVehicleAccess", "")
-                                if (initialTelco == null) {
+    LaunchedEffect(initialFolder, initialTelco) {
+        isRestoringProject = true
+        customFolderName = initialFolder
+        siteName = ""
+        isSiteNameConfirmed = false
+        lat = ""
+        lng = ""
+        fullAddress = "Detecting location..."
+        vehicleAccess = "4 Wheeled"
+        otherVehicleAccess = ""
+        telcoName = initialTelco ?: "Globe"
+        customTelcoName = ""
+        sectionImages.clear()
+        viewerUri = null
+        viewerFieldKey = null
+        viewerFieldSection = null
+        viewerFieldName = null
+        activeFieldKey = null
+        activeFieldSection = null
+        activeFieldName = null
+        tempPhotoUriString = null
+        tempFilePath = null
+        showReportOptions = false
+        triedToProceed = false
+
+        try {
+            if (initialFolder != null) {
+                val tssrDir = FileUtils.getSurveyFolder(context, "TSSR", "", "", initialFolder)
+                if (tssrDir != null && tssrDir.exists()) {
+                    withContext(Dispatchers.IO) {
+                        try {
+                            val props = FileUtils.loadMetadata(tssrDir)
+                            if (props != null) {
+                                withContext(Dispatchers.Main) {
+                                    siteName = props.getProperty("siteName", "")
+                                    if (siteName.isNotBlank()) isSiteNameConfirmed = true
+                                    lat = props.getProperty("lat", "")
+                                    lng = props.getProperty("lng", "")
+                                    fullAddress = props.getProperty("fullAddress", props.getProperty("siteAddress", ""))
+                                    vehicleAccess = props.getProperty("vehicleAccess", "4 Wheeled")
+                                    otherVehicleAccess = props.getProperty("otherVehicleAccess", "")
                                     telcoName = props.getProperty("telcoName", telcoName)
-                                }
-                                
-                                props.stringPropertyNames().filter { it.startsWith("img_") }.forEach { propKey ->
-                                    val key = propKey.substring(4)
-                                    val relPath = props.getProperty(propKey)
-                                    val imgFile = File(tssrDir, relPath)
-                                    if (imgFile.exists()) {
-                                        sectionImages[key] = FileProvider.getUriForFile(context, "com.example.isdp2java.fileprovider", imgFile)
+                                    customTelcoName = props.getProperty("customTelcoName", "")
+
+                                    props.stringPropertyNames().filter { it.startsWith("img_") }.forEach { propKey ->
+                                        val key = propKey.substring(4)
+                                        val relPath = props.getProperty(propKey)
+                                        if (relPath != null) {
+                                            val imgFile = File(tssrDir, relPath)
+                                            if (imgFile.exists()) {
+                                                sectionImages[key] = FileProvider.getUriForFile(context, "com.example.isdp2java.fileprovider", imgFile)
+                                            }
+                                        }
+                                    }
+                                    val mapPath = props.getProperty("mapSnapshotPath")
+                                    if (mapPath != null) {
+                                        val mapFile = File(tssrDir, mapPath)
+                                        if (mapFile.exists()) {
+                                            sectionImages["A3.1 Site Location_Vicinity Map"] = FileProvider.getUriForFile(context, "com.example.isdp2java.fileprovider", mapFile)
+                                        }
                                     }
                                 }
+                            } else {
+                                withContext(Dispatchers.Main) {
+                                    siteName = initialFolder.substringBeforeLast("_")
+                                    if (siteName.isNotBlank()) isSiteNameConfirmed = true
+                                }
                             }
-                        } else {
-                            withContext(Dispatchers.Main) {
-                                siteName = initialFolder.substringBeforeLast("_")
-                                if (siteName.isNotBlank()) isSiteNameConfirmed = true
-                            }
+                        } catch (e: Exception) {
+                            Log.e("TSSR", "Failed to load metadata", e)
                         }
-                    } catch (e: Exception) {
-                        Log.e("TSSR", "Failed to load metadata", e)
                     }
                 }
             }
+        } finally {
+            isRestoringProject = false
         }
     }
 
     LaunchedEffect(isSiteNameConfirmed, customFolderName, lat, lng, fullAddress, vehicleAccess, otherVehicleAccess, telcoName, customTelcoName, sectionImages.size) {
+        if (isRestoringProject) return@LaunchedEffect
         if (customFolderName != null || (isSiteNameConfirmed && siteName.isNotBlank())) {
             val folder = FileUtils.getSurveyFolder(context, "TSSR", siteName, sessionTimestamp, customFolderName)
             if (folder != null) {
@@ -311,11 +344,11 @@ fun TSSRScreen(
                         props.setProperty("lat", lat)
                         props.setProperty("lng", lng)
                         props.setProperty("fullAddress", fullAddress)
+                        props.setProperty("siteAddress", fullAddress) // Added for history consistency
                         props.setProperty("vehicleAccess", vehicleAccess)
                         props.setProperty("otherVehicleAccess", otherVehicleAccess)
-                        
-                        val finalTelco = if (telcoName == "Neutral" && customTelcoName.isNotBlank()) customTelcoName else telcoName
-                        props.setProperty("telcoName", finalTelco)
+                        props.setProperty("telcoName", telcoName)
+                        props.setProperty("customTelcoName", customTelcoName)
                         props.setProperty("surveyType", "TSSR")
 
                         sectionImages.forEach { (key, uri) ->
@@ -323,6 +356,9 @@ fun TSSRScreen(
                                 val relPath = FileUtils.findImageRelativePath(folder, u)
                                 if (relPath != null) {
                                     props.setProperty("img_$key", relPath)
+                                    if (key == "A3.1 Site Location_Vicinity Map") {
+                                        props.setProperty("mapSnapshotPath", relPath)
+                                    }
                                 }
                             }
                         }
@@ -662,7 +698,7 @@ fun TSSRScreen(
                         Text("Telco: $finalTelco")
                         Button(onClick = { 
                             generatePDF(context, siteName, lat, lng, fullAddress, finalTelco, sections, sectionImages, customFolderName, sessionTimestamp)
-                            showReportOptions = false 
+                            showReportOptions = false
                         }, modifier = Modifier.fillMaxWidth()) {
                             Icon(Icons.Default.PictureAsPdf, null)
                             Spacer(Modifier.width(8.dp))
@@ -670,7 +706,7 @@ fun TSSRScreen(
                         }
                         OutlinedButton(onClick = { 
                             generateDocx(context, siteName, lat, lng, fullAddress, finalTelco, sections, sectionImages, customFolderName, sessionTimestamp)
-                            showReportOptions = false 
+                            showReportOptions = false
                         }, modifier = Modifier.fillMaxWidth()) {
                             Icon(Icons.Default.Description, null)
                             Spacer(Modifier.width(8.dp))
@@ -740,27 +776,29 @@ fun TSSRScreen(
             )
         }
 
-        if (viewerUri != null) {
+        viewerUri?.let { currentViewerUri ->
             ImagePreviewDialog(
-                uri = viewerUri!!,
+                uri = currentViewerUri,
                 onDismiss = { viewerUri = null },
                 onRetake = {
+                    val fieldKey = viewerFieldKey
+                    val fieldSection = viewerFieldSection
+                    val fieldName = viewerFieldName
                     val isMapAction = viewerFieldName == "Vicinity Map"
                     viewerUri = null
-                    activeFieldKey = viewerFieldKey
-                    activeFieldSection = viewerFieldSection
-                    activeFieldName = viewerFieldName
-                    
+                    activeFieldKey = fieldKey
+                    activeFieldSection = fieldSection
+                    activeFieldName = fieldName
+
                     if (isMapAction) {
                         // Clear the existing map image so the user can take a new one
-                        sectionImages.remove(activeFieldKey!!)
-                        viewerUri = null
+                        fieldKey?.let(sectionImages::remove)
                         captureMapSnapshot(isResnap = true)
                     } else {
                         val hasCamera = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
                         if (!hasCamera) cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
-                        else {
-                            FileUtils.createSurveyFile(context, "TSSR", siteName, activeFieldSection!!, activeFieldName!!, sessionTimestamp, customFolderName)?.let { file ->
+                        else if (fieldSection != null && fieldName != null) {
+                            FileUtils.createSurveyFile(context, "TSSR", siteName, fieldSection, fieldName, sessionTimestamp, customFolderName)?.let { file ->
                                 tempFilePath = file.absolutePath
                                 val uri = FileProvider.getUriForFile(context, "com.example.isdp2java.fileprovider", file)
                                 tempPhotoUriString = uri.toString()
@@ -994,7 +1032,7 @@ fun CollapsibleTSSRSection(
                                                     onStartCamera(key, field)
                                                 }
                                             } else {
-                                                onImageClick(key, images[key]!!, field)
+                                                images[key]?.let { uri -> onImageClick(key, uri, field) }
                                             }
                                         },
                                         onGalleryClick = { onStartGallery(key, field) },

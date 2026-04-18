@@ -1,5 +1,7 @@
 package com.example.isdp2java
 
+import android.content.Context
+import androidx.compose.ui.platform.LocalContext
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -14,10 +16,19 @@ import com.example.isdp2java.ui.main.MatsiScreen
 
 @Composable
 fun Navigation(onThemeToggle: () -> Unit) {
+    val context = LocalContext.current
+    val sharedPrefs = remember { context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE) }
     val navController = rememberNavController()
 
     // Generalized shared folder state
-    var sharedFolder by remember { mutableStateOf<String?>(null) }
+    var sharedFolder by remember { 
+        mutableStateOf(sharedPrefs.getString("last_active_folder", null)) 
+    }
+
+    // Persist sharedFolder whenever it changes
+    LaunchedEffect(sharedFolder) {
+        sharedPrefs.edit().putString("last_active_folder", sharedFolder).apply()
+    }
 
     NavHost(navController = navController, startDestination = "auth") {
         composable("auth") {
@@ -41,26 +52,26 @@ fun Navigation(onThemeToggle: () -> Unit) {
                 onTssrFolderChange = { sharedFolder = it },
                 onWifiFolderChange = { sharedFolder = it },
                 onMatsiFolderChange = { sharedFolder = it },
-                onNavigateToTSSR = { folderName, telco ->
-                    val finalFolder = folderName ?: sharedFolder
-                    when (telco) {
+                onNavigateToTSSR = { folderName, typeOrBrand ->
+                    when (typeOrBrand) {
                         "Wifi" -> {
-                            val route = if (finalFolder != null) "wifi?folder=$finalFolder" else "wifi"
+                            val route = if (folderName != null) "wifi?folder=$folderName" else "wifi"
                             navController.navigate(route)
                         }
                         "Matsi" -> {
                             var route = "matsi"
                             val args = mutableListOf<String>()
-                            if (finalFolder != null) args.add("folder=$finalFolder")
-                            if (telco != null) args.add("telco=$telco")
+                            if (folderName != null) args.add("folder=$folderName")
                             if (args.isNotEmpty()) route += "?" + args.joinToString("&")
                             navController.navigate(route)
                         }
                         else -> {
                             var route = "tssr"
                             val args = mutableListOf<String>()
-                            if (finalFolder != null) args.add("folder=$finalFolder")
-                            if (telco != null) args.add("telco=$telco")
+                            if (folderName != null) args.add("folder=$folderName")
+                            if (typeOrBrand != null && typeOrBrand != "TSSR" && typeOrBrand != "Survey") {
+                                args.add("telco=$typeOrBrand")
+                            }
                             if (args.isNotEmpty()) route += "?" + args.joinToString("&")
                             navController.navigate(route)
                         }
@@ -86,7 +97,7 @@ fun Navigation(onThemeToggle: () -> Unit) {
             val folder = backStackEntry.arguments?.getString("folder")
             val telco = backStackEntry.arguments?.getString("telco")
             TSSRScreen(
-                initialFolder = folder ?: sharedFolder,
+                initialFolder = folder,
                 initialTelco = telco,
                 onBack = { navController.popBackStack() },
                 onFolderChange = { sharedFolder = it }
@@ -110,7 +121,7 @@ fun Navigation(onThemeToggle: () -> Unit) {
             val folder = backStackEntry.arguments?.getString("folder")
             val telco = backStackEntry.arguments?.getString("telco")
             MatsiScreen(
-                initialFolder = folder ?: sharedFolder,
+                initialFolder = folder,
                 initialTelco = telco,
                 onBack = { navController.popBackStack() },
                 onFolderChange = { sharedFolder = it }
@@ -128,7 +139,7 @@ fun Navigation(onThemeToggle: () -> Unit) {
         ) { backStackEntry ->
             val folder = backStackEntry.arguments?.getString("folder")
             WifiScreen(
-                initialFolder = folder ?: sharedFolder,
+                initialFolder = folder,
                 onBack = { navController.popBackStack() },
                 onFolderChange = { sharedFolder = it }
             )

@@ -4,7 +4,6 @@ import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.*
-import android.location.Geocoder
 import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
@@ -99,14 +98,8 @@ fun MatsiScreen(
     var viewerFieldName by remember { mutableStateOf<String?>(null) }
 
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
-    var customFolderName by remember { mutableStateOf(initialFolder) }
-
-    // Sync back to MainActivity when local folder state changes
-    LaunchedEffect(initialFolder) {
-        if (initialFolder != customFolderName) {
-            customFolderName = initialFolder
-        }
-    }
+    var customFolderName by remember { mutableStateOf<String?>(null) }
+    var isRestoringProject by remember { mutableStateOf(true) }
     
     LaunchedEffect(customFolderName) {
         onFolderChange(customFolderName)
@@ -129,7 +122,7 @@ fun MatsiScreen(
     val locationCallback = remember {
         object : LocationCallback() {
             override fun onLocationResult(result: LocationResult) {
-                if (initialFolder != null) return
+                if (initialFolder != null || isRestoringProject) return
                 result.lastLocation?.let { location ->
                     if (lat.isEmpty() || lng.isEmpty()) {
                         lat = location.latitude.toString()
@@ -151,26 +144,29 @@ fun MatsiScreen(
     var tempPhotoUriString by rememberSaveable { mutableStateOf<String?>(null) }
 
     val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
-        if (success && tempPhotoUriString != null && activeFieldKey != null) {
-            val originalUri = Uri.parse(tempPhotoUriString!!)
-            scope.launch {
-                val overlaidUri = withContext(Dispatchers.IO) {
-                    FileUtils.addOverlayToImage(context, originalUri, siteName, lat, lng, fullAddress)
-                }
-                overlaidUri?.let {
-                    sectionImages[activeFieldKey!!] = it
-                    viewerUri = it
-                    viewerFieldKey = activeFieldKey
-                    viewerFieldSection = activeFieldSection
-                    viewerFieldName = activeFieldName
-                }
+        if (!success) return@rememberLauncherForActivityResult
+
+        val photoUriString = tempPhotoUriString ?: return@rememberLauncherForActivityResult
+        val fieldKey = activeFieldKey ?: return@rememberLauncherForActivityResult
+        val originalUri = Uri.parse(photoUriString)
+
+        scope.launch {
+            val overlaidUri = withContext(Dispatchers.IO) {
+                FileUtils.addOverlayToImage(context, originalUri, siteName, lat, lng, fullAddress)
+            }
+            overlaidUri?.let {
+                sectionImages[fieldKey] = it
+                viewerUri = it
+                viewerFieldKey = fieldKey
+                viewerFieldSection = activeFieldSection
+                viewerFieldName = activeFieldName
             }
         }
     }
 
     val cameraPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted ->
         if (isGranted) {
-            activeFieldKey?.let { key ->
+            if (activeFieldKey != null) {
                 activeFieldSection?.let { section ->
                     activeFieldName?.let { field ->
                         FileUtils.createSurveyFile(context, "Matsi", siteName, section, field, sessionTimestamp, customFolderName)?.let { file ->
@@ -195,49 +191,85 @@ fun MatsiScreen(
         }
     }
 
-    LaunchedEffect(initialFolder) {
-        if (initialFolder != null) {
-            val matsiDir = FileUtils.getSurveyFolder(context, "Matsi", "", "", initialFolder)
-            if (matsiDir != null && matsiDir.exists()) {
-                withContext(Dispatchers.IO) {
-                    val metadataFile = File(matsiDir, "metadata.properties")
-                    if (metadataFile.exists()) {
-                        val props = FileUtils.loadMetadata(matsiDir)
-                        if (props != null) {
-                            withContext(Dispatchers.Main) {
-                                siteName = props.getProperty("siteName", "")
-                                if (siteName.isNotBlank()) isSiteNameConfirmed = true
-                                lat = props.getProperty("lat", "")
-                                lng = props.getProperty("lng", "")
-                                fullAddress = props.getProperty("fullAddress", "")
-                                if (initialTelco == null) {
-                                    telcoName = props.getProperty("telcoName", telcoName)
-                                }
-                                
-                                sectionCount = props.getProperty("sectionCount", "1").toIntOrNull() ?: 1
+    LaunchedEffect(initialFolder, initialTelco) {
+        isRestoringProject = true
+        customFolderName = initialFolder
+        siteName = ""
+        isSiteNameConfirmed = false
+        lat = ""
+        lng = ""
+        fullAddress = "Detecting location..."
+        telcoName = initialTelco ?: "Matsi"
+        customTelcoName = ""
+        sectionCount = 1
+        sectionImages.clear()
+        viewerUri = null
+        viewerFieldKey = null
+        viewerFieldSection = null
+        viewerFieldName = null
+        activeFieldKey = null
+        activeFieldSection = null
+        activeFieldName = null
+        tempPhotoUriString = null
+        showReportOptions = false
+        triedToProceed = false
 
-                                props.stringPropertyNames().filter { it.startsWith("img_") }.forEach { propKey ->
-                                    val key = propKey.substring(4)
-                                    val relPath = props.getProperty(propKey)
-                                    val imgFile = File(matsiDir, relPath)
-                                    if (imgFile.exists()) {
-                                        sectionImages[key] = FileProvider.getUriForFile(context, "com.example.isdp2java.fileprovider", imgFile)
+        try {
+            if (initialFolder != null) {
+                val matsiDir = FileUtils.getSurveyFolder(context, "Matsi", "", "", initialFolder)
+                if (matsiDir != null && matsiDir.exists()) {
+                    withContext(Dispatchers.IO) {
+                        val metadataFile = File(matsiDir, "metadata.properties")
+                        if (metadataFile.exists()) {
+                            val props = FileUtils.loadMetadata(matsiDir)
+                            if (props != null) {
+                                withContext(Dispatchers.Main) {
+                                    siteName = props.getProperty("siteName", "")
+                                    if (siteName.isNotBlank()) isSiteNameConfirmed = true
+                                    lat = props.getProperty("lat", "")
+                                    lng = props.getProperty("lng", "")
+                                    fullAddress = props.getProperty("fullAddress", props.getProperty("siteAddress", ""))
+                                    telcoName = props.getProperty("telcoName", telcoName)
+                                    customTelcoName = props.getProperty("customTelcoName", "")
+
+                                    sectionCount = props.getProperty("sectionCount", "1").toIntOrNull() ?: 1
+
+                                    props.stringPropertyNames().filter { it.startsWith("img_") }.forEach { propKey ->
+                                        val key = propKey.substring(4)
+                                        val relPath = props.getProperty(propKey)
+                                        if (relPath != null) {
+                                            val imgFile = File(matsiDir, relPath)
+                                            if (imgFile.exists()) {
+                                                sectionImages[key] = FileProvider.getUriForFile(context, "com.example.isdp2java.fileprovider", imgFile)
+                                            }
+                                        }
+                                    }
+                                    val mapPath = props.getProperty("mapSnapshotPath")
+                                    if (mapPath != null) {
+                                        val mapFile = File(matsiDir, mapPath)
+                                        if (mapFile.exists()) {
+                                            // Try to map back to Section 1 if that's what we used
+                                            sectionImages["Section 1_GPS Reading"] = FileProvider.getUriForFile(context, "com.example.isdp2java.fileprovider", mapFile)
+                                        }
                                     }
                                 }
                             }
-                        }
-                    } else {
-                        withContext(Dispatchers.Main) {
-                            siteName = initialFolder
-                            if (siteName.isNotBlank()) isSiteNameConfirmed = true
+                        } else {
+                            withContext(Dispatchers.Main) {
+                                siteName = initialFolder
+                                if (siteName.isNotBlank()) isSiteNameConfirmed = true
+                            }
                         }
                     }
                 }
             }
+        } finally {
+            isRestoringProject = false
         }
     }
 
     LaunchedEffect(isSiteNameConfirmed, customFolderName, lat, lng, fullAddress, telcoName, customTelcoName, sectionImages.size, sectionCount) {
+        if (isRestoringProject) return@LaunchedEffect
         if (customFolderName != null || (isSiteNameConfirmed && siteName.isNotBlank())) {
             val folder = FileUtils.getSurveyFolder(context, "Matsi", siteName, sessionTimestamp, customFolderName)
             if (folder != null) {
@@ -248,8 +280,10 @@ fun MatsiScreen(
                         props.setProperty("lat", lat)
                         props.setProperty("lng", lng)
                         props.setProperty("fullAddress", fullAddress)
-                        val finalTelco = if (telcoName == "Neutral" && customTelcoName.isNotBlank()) customTelcoName else telcoName
-                        props.setProperty("telcoName", finalTelco)
+                        props.setProperty("siteAddress", fullAddress) // Added for history consistency
+                        props.setProperty("telcoName", telcoName)
+                        props.setProperty("customTelcoName", customTelcoName)
+                        props.setProperty("surveyType", "Matsi")
                         props.setProperty("sectionCount", sectionCount.toString())
                         
                         sectionImages.forEach { (key, uri) ->
@@ -257,6 +291,10 @@ fun MatsiScreen(
                                 val relPath = FileUtils.findImageRelativePath(folder, u)
                                 if (relPath != null) {
                                     props.setProperty("img_$key", relPath)
+                                    // For Matsi, we might have multiple GPS/Maps, use first one for history thumbnail
+                                    if (key == "Section 1_GPS Reading" && !props.containsKey("mapSnapshotPath")) {
+                                        props.setProperty("mapSnapshotPath", relPath)
+                                    }
                                 }
                             }
                         }
@@ -276,7 +314,7 @@ fun MatsiScreen(
         } else {
             try {
                 fusedLocationClient.lastLocation.addOnSuccessListener { location ->
-                    if (initialFolder == null && location != null) {
+                    if (!isRestoringProject && initialFolder == null && location != null) {
                         if (lat.isEmpty()) lat = location.latitude.toString()
                         if (lng.isEmpty()) lng = location.longitude.toString()
                         scope.launch {
@@ -336,11 +374,10 @@ fun MatsiScreen(
         }
     }
 
-    var mapRef by remember { mutableStateOf<MapView?>(null) }
-    var activeMapSectionIndex by remember { mutableStateOf(-1) }
+    val mapRefs = remember { mutableStateMapOf<Int, MapView?>() }
 
     fun captureMapSnapshot(sectionIndex: Int, isResnap: Boolean = false) {
-        val map = mapRef ?: return
+        val map = mapRefs[sectionIndex] ?: return
 
         // Ensure the map is laid out and has dimensions
         if (map.width <= 0 || map.height <= 0) {
@@ -569,8 +606,7 @@ fun MatsiScreen(
                             }
                         },
                         mapRef = { 
-                            mapRef = it
-                            activeMapSectionIndex = index
+                            mapRefs[index] = it
                         }
                     )
                 }
@@ -627,7 +663,7 @@ fun MatsiScreen(
                     Text("Telco: $finalTelco")
                     Button(onClick = { 
                         generateMatsiPDF(context, siteName, lat, lng, fullAddress, finalTelco, matsiSections, sectionImages, customFolderName, sessionTimestamp)
-                        showReportOptions = false 
+                        showReportOptions = false
                     }, modifier = Modifier.fillMaxWidth()) {
                         Icon(Icons.Default.PictureAsPdf, null)
                         Spacer(Modifier.width(8.dp))
@@ -635,7 +671,7 @@ fun MatsiScreen(
                     }
                     OutlinedButton(onClick = { 
                         generateMatsiDocx(context, siteName, lat, lng, fullAddress, finalTelco, matsiSections, sectionImages, customFolderName, sessionTimestamp)
-                        showReportOptions = false 
+                        showReportOptions = false
                     }, modifier = Modifier.fillMaxWidth()) {
                         Icon(Icons.Default.Description, null)
                         Spacer(Modifier.width(8.dp))
@@ -713,9 +749,9 @@ fun MatsiScreen(
         )
     }
 
-    if (viewerUri != null) {
+    viewerUri?.let { currentViewerUri ->
         MatsiImagePreviewDialog(
-            uri = viewerUri!!,
+            uri = currentViewerUri,
             onDismiss = { viewerUri = null },
             onRetake = {
                 val key = viewerFieldKey ?: ""
@@ -796,7 +832,7 @@ fun CollapsibleMatsiSection(
                                             if (images[key] == null) {
                                                 if (isGpsReading) onScreenshot() else onStartCamera(key, field)
                                             } else {
-                                                onImageClick(key, images[key]!!, field)
+                                                images[key]?.let { uri -> onImageClick(key, uri, field) }
                                             }
                                         },
                                         onGalleryClick = { onStartGallery(key, field) },
@@ -857,6 +893,13 @@ fun MatsiImagePreviewDialog(uri: Uri, onDismiss: () -> Unit, onRetake: () -> Uni
 
 @Composable
 fun MatsiVicinityMapView(lat: String, lng: String, onMapReady: (MapView) -> Unit) {
+    val targetPoint = remember(lat, lng) {
+        val parsedLat = lat.toDoubleOrNull()
+        val parsedLng = lng.toDoubleOrNull()
+        if (parsedLat != null && parsedLng != null) GeoPoint(parsedLat, parsedLng) else null
+    }
+    var lastCenteredPoint by remember { mutableStateOf<GeoPoint?>(null) }
+
     Box(modifier = Modifier.fillMaxWidth().height(200.dp).clip(RoundedCornerShape(8.dp))) {
         AndroidView(
             factory = { ctx ->
@@ -865,25 +908,23 @@ fun MatsiVicinityMapView(lat: String, lng: String, onMapReady: (MapView) -> Unit
                     setMultiTouchControls(true)
                     zoomController.setVisibility(org.osmdroid.views.CustomZoomButtonsController.Visibility.NEVER)
                     controller.setZoom(18.0)
-                    val startPoint = GeoPoint(lat.toDoubleOrNull() ?: 14.59, lng.toDoubleOrNull() ?: 120.98)
+                    val startPoint = targetPoint ?: GeoPoint(14.59, 120.98)
                     controller.setCenter(startPoint)
+                    lastCenteredPoint = startPoint
                     val locationOverlay = MyLocationNewOverlay(GpsMyLocationProvider(ctx), this)
                     locationOverlay.enableMyLocation()
                     overlays.add(locationOverlay)
                     onMapReady(this)
                 }
             },
-            update = { /* Do nothing in update to preserve user zoom/pan */ }
+            update = { mapView ->
+                if (targetPoint != null && lastCenteredPoint != targetPoint) {
+                    mapView.controller.setCenter(targetPoint)
+                    lastCenteredPoint = targetPoint
+                }
+            }
         )
     }
-}
-
-private fun getMatsiFolder(context: Context, siteName: String, sessionTimestamp: String, customFolderName: String?): File? {
-    return FileUtils.getSurveyFolder(context, "Matsi", siteName, sessionTimestamp, customFolderName)
-}
-
-private fun createMatsiFile(context: Context, siteName: String, section: String, fieldName: String, sessionTime: String, customFolderName: String?): File? {
-    return FileUtils.createSurveyFile(context, "Matsi", siteName, section, fieldName, sessionTime, customFolderName)
 }
 
 private fun generateMatsiPDF(context: Context, siteName: String, lat: String, lng: String, address: String, telco: String, sections: List<TSSRSectionData>, images: Map<String, Uri?>, customFolderName: String?, sessionTime: String) {
@@ -1004,12 +1045,4 @@ private fun generateMatsiDocx(context: Context, siteName: String, lat: String, l
     } catch (e: Exception) {
         Log.e("MatsiScreen", "DOCX creation failed", e)
     }
-}
-
-private fun getAddressFromLocation(context: Context, latitude: Double, longitude: Double): String {
-    return FileUtils.getAddressFromLocation(context, latitude, longitude)
-}
-
-private fun addOverlayToImage(context: Context, uri: Uri, siteName: String, lat: String, lng: String, address: String): Uri? {
-    return FileUtils.addOverlayToImage(context, uri, siteName, lat, lng, address)
 }
