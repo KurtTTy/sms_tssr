@@ -110,6 +110,42 @@ Before building or running the project, make sure you have:
 
 ---
 
+## Project Structure
+
+```
+sms_isdp/
+├── app/
+│   └── src/main/
+│       ├── java/com/example/isdp2java/
+│       │   ├── MainActivity.kt          # App entry point, theme setup
+│       │   ├── Navigation.kt            # Auth → Main → TSSR navigation graph
+│       │   └── ui/
+│       │       ├── auth/
+│       │       │   └── AuthScreen.kt    # Login and Sign-Up screens
+│       │       ├── main/
+│       │       │   ├── MainScreen.kt    # Dashboard: brand selection + history
+│       │       │   ├── TSSRScreen.kt    # Full survey form (~937 lines)
+│       │       │   └── Models.kt        # Data classes (Brand, History, TSSRSectionData)
+│       │       └── theme/
+│       │           ├── Color.kt
+│       │           ├── Theme.kt
+│       │           └── Typography.kt
+│       ├── res/
+│       │   ├── drawable/                # Telco logos (Globe, Smart, Dito)
+│       │   ├── mipmap-*/               # App launcher icons
+│       │   └── xml/
+│       │       └── file_paths.xml      # FileProvider path config
+│       └── AndroidManifest.xml
+├── gradle/
+│   └── libs.versions.toml              # Centralized dependency versions
+├── build.gradle.kts                    # Root build configuration
+├── settings.gradle.kts                 # Module settings
+├── gradlew / gradlew.bat               # Gradle wrapper scripts
+└── README.md
+```
+
+---
+
 ## Configuration
 
 ### Credentials
